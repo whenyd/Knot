@@ -52,10 +52,10 @@ CREATE TABLE submodule (
 
 CREATE TABLE task (
   id             INTEGER PRIMARY KEY,
-  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,   -- NULL = 「待办」
-  module_id      INTEGER REFERENCES module(id) ON DELETE SET NULL,
-  submodule_id   INTEGER REFERENCES submodule(id) ON DELETE SET NULL,
-  parent_task_id INTEGER REFERENCES task(id) ON DELETE CASCADE,      -- NULL = 顶层任务
+  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,    -- NULL = 「待办」
+  module_id      INTEGER REFERENCES module(id) ON DELETE CASCADE,
+  submodule_id   INTEGER REFERENCES submodule(id) ON DELETE CASCADE,
+  parent_task_id INTEGER REFERENCES task(id) ON DELETE CASCADE,       -- NULL = 顶层任务
   title          TEXT    NOT NULL,
   status         TEXT    NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','doing','done')),
   priority       TEXT    NOT NULL DEFAULT 'mid'  CHECK (priority IN ('high','mid','low')),
@@ -74,7 +74,9 @@ CREATE INDEX idx_task_parent  ON task(parent_task_id);
 - **子任务不存 `module_id`/`submodule_id`**（恒为 NULL）。子任务跟随父任务、不能单独移动，所以归属的唯一真相在父任务上；冗余一份只会漂移。
 - **状态与优先级存文本而非整数**，用 `CHECK` 约束。库文件是给人看的，`'doing'` 比 `1` 好读，值集合也由 `CHECK` 兜住。
 - **"只允许一层子任务"无法用 `CHECK` 表达**（SQLite 的 CHECK 不支持子查询），由 `domain.rs` 在创建时保证。
-- 外键级联只在"删父带走子"上使用；`module`/`submodule` 被删时任务的 `ON DELETE SET NULL` 让它自然回到"未分类"，不再单独写清理逻辑。
+- 外键级联一律是"删父带走子"：删项目带走它的模块与任务，删模块带走它的子模块与任务，删任务带走它的子任务。**删除模块时组内的任务是真的被删掉，不是"退回未分类"**（两者都是数据，但只有一个是可恢复的，所以删除一律走 `plan_*` 先告知条数）。
+
+> 注意：v1 迁移发布时这三列写的是 `ON DELETE SET NULL`（“退回未分类”）。已发布的迁移条目不能改，所以 v2 用"新建表 → 拷贝 → 删旧表 → 改名"把 `module_id`/`submodule_id` 改成 `CASCADE`（SQLite 不支持 ALTER 外键）。
 
 ## 迁移策略
 
@@ -140,13 +142,21 @@ delete_task(id)
 
 **错误约定**：命令的 `Err` 一律是给人看的一句话（`String`），不用结构化错误对象——前端只做一件事：在底部轻提示里原样显示。需要分类处理的场景（`needs_confirm`、条数）走 `Ok` 里的字段，不走错误通道。
 
+**字段名约定**：跨 IPC 的结构一律 camelCase（Rust 侧 `#[serde(rename_all = "camelCase")]`，枚举值小写），前端类型与之逐字对应。字段名归后端所有，前端不另行映射。`domain.rs` 里有几条单测专门盯着这个契约。
+
+**归属参数归后端校验**：`create_task` 接受 `module_id`/`submodule_id`，由 `domain.rs` 验证「模块属于该项目」「子模块属于该模块」「「待办」的任务不能带模块」。前端只负责把当前范围翻译成这两个 id（`resolveTarget`），不代替后端判定合法性。
+
 **默认值归属**：`status`/`priority` 的默认值由 `domain.rs` 在 INSERT 时显式写出，schema 的 `DEFAULT` 只作兜底。同一条规则不在两处表达，改默认值只有一个地方要动。
 
 ## 前端结构
 
-- **视图状态**：`container`（待办 / 某个项目）、`scope`（整个项目 / 某模块 / 某子模块 / 未分类）、`statusFilter: Set`、`priorityFilter: Set`、`expanded: Set<nodeId>`。
+- **视图状态**：`container`（待办 / 某个项目）、`scope`（全部 / 某模块 / 某子模块 / 未分类）、`statusFilter: Set`、`priorityFilter: Set`、`collapsedNodes: Set<nodeId>`（左栏范围树收起的模块）。
+- **一次渲染只建一棵树**：`buildGroups` 的结果同时给左栏范围树算计数、给表格做分组，`selectScope` 再把范围套上去——同一棵树不会被算两遍、更不会两份不一致。
+- **两处折叠互不影响**：左栏范围树的收起（`collapsedNodes`）只管树的显示，表格分组行的收起（`collapsedGroups`）只管表格的行。一个是导航，一个是阅读密度。
 - **数据管线**（单一方向，不双向绑定）：`list_tasks` → 按 scope 过滤 → 按两个筛选集过滤 → 按 module/submodule 建树 → 分组按 `sort_order`、组内任务按 `priority` 再 `sort_order` 排序 → 渲染。
 - **交互归属**：状态格点击只调 `plan_set_status`；`needs_confirm` 为真就弹窗；`apply_set_status` 回来后重取。就地编辑（双击）走 `rename_task`，空值前端还原、后端也拒绝。
+- **弹窗有两种形态，共用一个 modal**：`askConfirm`（告知影响后确认）与 `askText`（改名/新建时输入一个名字）。**同一时刻只能有一个弹窗**——新弹窗会把上一个按“取消”收场，否则两个 `await` 会同时悬着、抢同一批 DOM 监听，一次回车跑两个命令（已发生过）。输入框里空白名不关窗也不出库。
+- **左栏右键菜单**：新建/重命名/删除结构（项目、模块、子模块）的入口统一放在左栏的 `contextmenu` 上，不再为每件事各摆一个按钮。菜单是自建 DOM（`src/menu.ts`，与确认框同一层），`preventDefault` 掉原生菜单；打开时先关掉上一个，点外面 / Esc / 滚屏 / 窗口失焦关闭，上下键在菜单项间移动。
 - **轻提示**：表格底部一条队列，几秒后自动消失，不阻塞任何操作。
 
 ## 边界情况
