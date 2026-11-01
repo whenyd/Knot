@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>待办</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div class="app">
+      <!-- 左栏：最上方恒为「待办」，下面才是项目分段与项目列表 -->
+      <aside class="sidebar">
+        <nav class="side-group" id="todo-section"></nav>
+
+        <div class="side-heading">项目</div>
+        <nav class="side-group" id="project-section"></nav>
+
+        <form class="side-form" id="project-form" hidden>
+          <input
+            id="project-input"
+            placeholder="项目名，回车创建"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </form>
+        <button class="side-add" id="project-add" type="button">＋ 新建项目</button>
+      </aside>
+
+      <main class="main">
+        <header class="toolbar">
+          <h1 class="view-title" id="view-title">待办</h1>
+          <span class="badge" id="view-count"></span>
+          <button class="ghost" id="module-add" type="button" hidden>＋ 模块</button>
+          <form class="inline-form" id="module-form" hidden>
+            <input
+              id="module-input"
+              placeholder="模块名，回车创建"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </form>
+        </header>
+
+        <div class="grid-scroll">
+          <table class="grid">
+            <colgroup>
+              <col style="width: 52px" />
+              <col style="width: 78px" />
+              <col />
+              <col style="width: 220px" />
+              <col style="width: 36px" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>优先级</th>
+                <th>任务</th>
+                <th>备注</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="grid-body"></tbody>
+          </table>
+          <p class="empty" id="empty" hidden></p>
+        </div>
+
+        <form class="add" id="task-form">
+          <input
+            id="task-input"
+            placeholder="添加任务，回车保存（默认“未分类 / 中”）"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </form>
+      </main>
+    </div>
+
+    <div class="notice" id="notice" role="status" hidden></div>
+  </body>
+</html>
