@@ -1,0 +1,8 @@
+# 本地工具状态（IDE / ThinkRail 上下文），不入库
+.openidea/
+.thinkrail/
+
+# 构建产物
+node_modules/
+dist/
+src-tauri/target/
