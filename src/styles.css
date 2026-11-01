@@ -423,16 +423,359 @@ body {
   background: var(--danger);
 }
 
-/* 工具栏里的就地输入（新建模块） */
-.inline-form {
-  margin-left: auto;
+/* ---------------------------------------------------------------- 格内编辑 */
+
+/* 状态与优先级都是按钮：一个字段一个控件，点一下换下一个值 */
+.status,
+.priority {
+  appearance: none;
+  padding: 1px 7px;
+  font: inherit;
+  cursor: pointer;
 }
 
-.inline-form input {
-  padding: 4px 9px;
+.status {
+  padding: 0;
+  border-radius: 5px;
+}
+
+.status:hover,
+.priority:hover {
+  filter: brightness(0.96);
+}
+
+.status:focus-visible,
+.priority:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 输入框不加描边：它自己那圈 1px 蓝色边框就是"正在编辑"的信号。
+   再加上 outline 会变成两层同心圆，看上去像边框变粗了。 */
+
+/* 优先级按钮的圆点由 .priority::before 画，按钮只多一个光标手势 */
+.cell-priority {
+  overflow: hidden;
+}
+
+/* 双击标题后就地变输入框：单线条，只靠这圈 1px 边框表示焦点 */
+.title-input {
+  width: 100%;
+  padding: 2px 6px;
   border: 1px solid var(--accent);
+  border-radius: 5px;
+  outline: none;
+  font: inherit;
+  font-size: 12.5px;
+}
+
+/* 改优先级后行会跳到新位置，短暂闪一下背景，让人跟得上 */
+.row-task.just-moved > td {
+  animation: flash-move 1.1s ease-out;
+}
+
+@keyframes flash-move {
+  from {
+    background: #fef3c7;
+  }
+  to {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row-task.just-moved > td {
+    animation: none;
+    background: #fef3c7;
+  }
+}
+
+/* ---------------------------------------------------------------- 确认框 */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(17 24 39 / 28%);
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal-card {
+  width: min(420px, calc(100vw - 48px));
+  padding: 18px 20px 14px;
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 18%);
+}
+
+.modal-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.modal-body {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.btn {
+  padding: 5px 14px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: #f7f8fa;
+}
+
+.btn-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: #1d4ed8;
+}
+
+/* ---------------------------------------------------------------- 左栏范围树 */
+
+.side-heading[hidden],
+.side-group[hidden] {
+  display: none;
+}
+
+.scope-row {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  border-radius: 6px;
+}
+
+.scope-row:hover {
+  background: #f2f4f7;
+}
+
+.scope-row.selected {
+  background: #e8f0fe;
+}
+
+.scope-caret {
+  display: inline-block;
+  flex: 0 0 14px;
+  min-height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* 折叠箭头用 CSS 画三角：字体里的 ▾/▸ 在小字号下常被渲染成小点 */
+button.scope-caret::before,
+button.group-caret::before {
+  content: "";
+  display: inline-block;
+  vertical-align: middle;
+  /* 向下 = 已展开 */
+  border-top: 5px solid currentColor;
+  border-right: 4px solid transparent;
+  border-left: 4px solid transparent;
+}
+
+button.scope-caret.is-collapsed::before,
+button.group-caret.is-collapsed::before {
+  /* 向右 = 已收起 */
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  border-right: 0;
+}
+
+.scope-name {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: #4b5563;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.scope-row.selected .scope-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.scope-count {
+  flex: 0 0 auto;
+  padding-right: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* 表格里的分组行也能收起（与左栏范围树的收起互不影响） */
+.group-caret {
+  width: 14px;
+  min-height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* ---------------------------------------------------------------- 优先级浮窗 */
+
+.picker {
+  position: fixed;
+  z-index: 20;
+  min-width: 104px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
+}
+
+.picker-item {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.picker-item:hover {
+  background: #f3f4f6;
+}
+
+.picker-item.is-current {
+  font-weight: 600;
+}
+
+.picker-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.picker-dot-high {
+  background: #ef4444;
+}
+
+.picker-dot-mid {
+  background: #f59e0b;
+}
+
+.picker-dot-low {
+  background: #94a3b8;
+}
+
+.picker-check {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 11px;
+}
+
+/* ---------------------------------------------------------------- 右键菜单 */
+
+.menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item:hover,
+.menu-item:focus-visible {
+  background: #f3f4f6;
+  outline: none;
+}
+
+/* ---------------------------------------------------------------- 输入弹窗 */
+
+.modal-field {
+  display: block;
+  margin: 0 0 16px;
+}
+
+.modal-field[hidden] {
+  display: none;
+}
+
+.modal-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.modal-input {
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
   border-radius: 6px;
   outline: none;
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
+}
+
+.modal-input:focus {
+  border-color: var(--accent);
 }

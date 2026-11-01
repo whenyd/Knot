@@ -10,23 +10,52 @@ import {
   api,
   type Container,
   type Module,
+  type Priority,
   type Project,
+  type Status,
   type Task,
 } from "./api";
-import { buildGroups, countGroup, sortTasks, type Group } from "./grouping";
+import { openMenu, type MenuItem } from "./menu";
+import {
+  buildGroups,
+  countGroup,
+  countGroups,
+  resolveTarget,
+  scopeLabel,
+  selectScope,
+  sortTasks,
+  type Group,
+  type Scope,
+} from "./grouping";
+
+// 状态是三态**循环**：一个字段一个控件，点一下换下一个值。
+const NEXT_STATUS: Record<Status, Status> = { todo: "doing", doing: "done", done: "todo" };
+const STATUS_LABELS: Record<Status, string> = { todo: "未完成", doing: "进行中", done: "已完成" };
+
+// 优先级是浮窗选择：三档都摆出来，不用循环着找。
+const PRIORITY_ORDER: Priority[] = ["high", "mid", "low"];
+const PRIORITY_LABELS: Record<Priority, string> = { high: "高", mid: "中", low: "低" };
 
 interface State {
   projects: Project[];
   container: Container;
+  scope: Scope;
   modules: Module[];
   tasks: Task[];
+  /** 左栏范围树里**收起**的模块 id。默认展开，所以存的是收起的那几个。 */
+  collapsedNodes: Set<number>;
+  /** 表格里收起的分类分组，key 由 `groupKey` 生成。与左栏的收起互不影响。 */
+  collapsedGroups: Set<string>;
 }
 
 const state: State = {
   projects: [],
   container: { kind: "todo" },
+  scope: { kind: "project" },
   modules: [],
   tasks: [],
+  collapsedNodes: new Set(),
+  collapsedGroups: new Set(),
 };
 
 // ---------------------------------------------------------------------------
@@ -56,9 +85,8 @@ const dom = {
   projectForm: must<HTMLFormElement>("project-form"),
   projectInput: must<HTMLInputElement>("project-input"),
   projectAdd: must<HTMLButtonElement>("project-add"),
-  moduleAdd: must<HTMLButtonElement>("module-add"),
-  moduleForm: must<HTMLFormElement>("module-form"),
-  moduleInput: must<HTMLInputElement>("module-input"),
+  scopeHeading: must<HTMLElement>("scope-heading"),
+  scopeSection: must<HTMLElement>("scope-section"),
   viewTitle: must<HTMLElement>("view-title"),
   viewCount: must<HTMLElement>("view-count"),
   body: must<HTMLTableSectionElement>("grid-body"),
@@ -66,6 +94,14 @@ const dom = {
   taskForm: must<HTMLFormElement>("task-form"),
   taskInput: must<HTMLInputElement>("task-input"),
   notice: must<HTMLElement>("notice"),
+  modal: must<HTMLElement>("modal"),
+  modalTitle: must<HTMLElement>("modal-title"),
+  modalBody: must<HTMLElement>("modal-body"),
+  modalField: must<HTMLElement>("modal-field"),
+  modalLabel: must<HTMLElement>("modal-label"),
+  modalInput: must<HTMLInputElement>("modal-input"),
+  modalOk: must<HTMLButtonElement>("modal-ok"),
+  modalCancel: must<HTMLButtonElement>("modal-cancel"),
 };
 
 // ---------------------------------------------------------------------------
@@ -87,10 +123,13 @@ async function reload(): Promise<void> {
 }
 
 async function selectProject(project: Project): Promise<void> {
-  state.container = project.isTodo || project.id === null
-    ? { kind: "todo" }
-    : { kind: "project", id: project.id };
-  closeModuleForm(); // 切容器时收起就地输入，别把一半输入带到另一个视图
+  state.container =
+    project.isTodo || project.id === null ? { kind: "todo" } : { kind: "project", id: project.id };
+  // 换容器等于换了一棵树：范围回到"整个项目"，收起状态也没有意义了。
+  state.scope = { kind: "project" };
+  state.collapsedNodes.clear();
+  state.collapsedGroups.clear();
+  closePriorityPicker();
   await reload();
 }
 
@@ -99,12 +138,14 @@ async function selectProject(project: Project): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function render(): void {
-  renderSidebar();
-  renderToolbar();
-  renderTable();
+  // 分组只算一次：左栏范围树和表格用的是同一棵树。
+  const groups = buildGroups(state.tasks, state.modules);
+  renderSidebar(groups);
+  renderToolbar(groups);
+  renderTable(groups);
 }
 
-function renderSidebar(): void {
+function renderSidebar(groups: Group[]): void {
   dom.todoSection.replaceChildren();
   dom.projectSection.replaceChildren();
 
@@ -112,6 +153,8 @@ function renderSidebar(): void {
     const button = renderSideItem(project);
     (project.isTodo ? dom.todoSection : dom.projectSection).append(button);
   }
+
+  renderScopeTree(groups);
 }
 
 function renderSideItem(project: Project): HTMLButtonElement {
@@ -127,6 +170,21 @@ function renderSideItem(project: Project): HTMLButtonElement {
   button.addEventListener("click", () => {
     void selectProject(project);
   });
+
+  // 右键：项目上没有结构可管时不拦原生菜单（「待办」就属于这种）
+  button.addEventListener("contextmenu", (event) => {
+    if (project.isTodo || project.id === null) return;
+    const projectId = project.id;
+    event.preventDefault();
+    openMenu(event.clientX, event.clientY, [
+      { label: "新建模块", onSelect: () => void createModuleIn(projectId) },
+      {
+        label: "重命名项目",
+        onSelect: () => void renameNode({ kind: "project", id: projectId, name: project.name }),
+      },
+    ]);
+  });
+
   return button;
 }
 
@@ -141,48 +199,234 @@ function currentProject(): Project | undefined {
   return state.projects.find((p) => p.id === container.id);
 }
 
-function renderToolbar(): void {
-  dom.viewTitle.textContent = currentProject()?.name ?? "待办";
-  dom.moduleAdd.hidden = state.container.kind !== "project" || !dom.moduleForm.hidden;
+/**
+ * 左栏范围树：整个项目 / 模块 / 子模块 / 未分类。点哪个就把主视图限定在哪个子树。
+ * 「待办」没有模块，也就没有这层树。
+ */
+function renderScopeTree(groups: Group[]): void {
+  dom.scopeSection.replaceChildren();
 
-  const parents = state.tasks.filter((task) => task.parentTaskId === null);
-  const done = parents.filter((task) => task.status === "done").length;
-  dom.viewCount.textContent = parents.length === 0 ? "暂无任务" : `${done}/${parents.length}`;
+  const visible = state.container.kind === "project";
+  dom.scopeHeading.hidden = !visible;
+  dom.scopeSection.hidden = !visible;
+  if (!visible) return;
+
+  dom.scopeSection.append(
+    renderScopeNode({
+      scope: { kind: "project" },
+      label: "全部",
+      count: countGroups(groups),
+      indent: 0,
+    }),
+  );
+
+  for (const group of groups) {
+    if (group.kind !== "module" || group.id === null) continue;
+    const collapsed = state.collapsedNodes.has(group.id);
+
+    dom.scopeSection.append(
+      renderScopeNode({
+        scope: { kind: "module", id: group.id },
+        label: group.label,
+        count: countGroup(group),
+        indent: 0,
+        ...(group.children.length > 0 ? { collapsible: { id: group.id, collapsed } } : {}),
+      }),
+    );
+    if (collapsed) continue;
+
+    for (const child of group.children) {
+      if (child.id === null) continue;
+      dom.scopeSection.append(
+        renderScopeNode({
+          scope: { kind: "submodule", id: child.id },
+          label: child.label,
+          count: countGroup(child),
+          indent: 1,
+        }),
+      );
+    }
+  }
+
+  const unclassified = groups.find((group) => group.kind === "unclassified");
+  if (unclassified) {
+    dom.scopeSection.append(
+      renderScopeNode({
+        scope: { kind: "unclassified" },
+        label: unclassified.label,
+        count: countGroup(unclassified),
+        indent: 0,
+      }),
+    );
+  }
 }
 
-function renderTable(): void {
-  dom.body.replaceChildren();
+interface ScopeNodeOptions {
+  scope: Scope;
+  label: string;
+  count: { done: number; total: number };
+  indent: 0 | 1;
+  /** 只有带子模块的模块节点才有折叠箭头 */
+  collapsible?: { id: number; collapsed: boolean };
+}
 
-  const isEmpty = state.tasks.length === 0;
-  dom.empty.hidden = !isEmpty;
-  dom.empty.textContent =
-    state.container.kind === "todo"
-      ? "「待办」里还没有任务。在下面输入一行，回车保存。"
-      : "这个项目还没有任务。在下面输入一行，回车保存。";
+function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
+  const row = el("div", "scope-row");
+  row.classList.toggle("selected", isScopeCurrent(options.scope));
+  row.style.paddingLeft = `${8 + options.indent * 16}px`;
+
+  if (options.collapsible) {
+    const { id, collapsed } = options.collapsible;
+    // 三角由 CSS 的 ::before 画，元素里不要放字符：
+    // 字面 ▾ 叠上伪元素就是两个三角（已经错过一次）。
+    const caret = el("button", collapsed ? "scope-caret is-collapsed" : "scope-caret");
+    caret.type = "button";
+    caret.title = collapsed ? "展开子模块" : "收起子模块";
+    caret.setAttribute("aria-label", caret.title);
+    caret.addEventListener("click", () => {
+      toggleNode(id);
+    });
+    row.append(caret);
+  } else {
+    row.append(el("span", "scope-caret"));
+  }
+
+  const name = el("button", "scope-name", options.label);
+  name.type = "button";
+  name.title = options.label;
+  name.addEventListener("click", () => {
+    applyScope(options.scope);
+  });
+
+  row.append(name, el("span", "scope-count", `${options.count.done}/${options.count.total}`));
+
+  row.addEventListener("contextmenu", (event) => {
+    const items = scopeMenuItems(options);
+    if (items.length === 0) return;
+    event.preventDefault();
+    openMenu(event.clientX, event.clientY, items);
+  });
+
+  return row;
+}
+
+/** 右键某个范围节点时能做什么。结构建在哪一级，菜单就长在哪一级。 */
+function scopeMenuItems(options: ScopeNodeOptions): MenuItem[] {
+  const { scope, label } = options;
+
+  switch (scope.kind) {
+    case "project": {
+      const projectId = state.container.kind === "project" ? state.container.id : null;
+      return projectId === null
+        ? []
+        : [{ label: "新建模块", onSelect: () => void createModuleIn(projectId) }];
+    }
+    case "module":
+      return [
+        { label: "新建子模块", onSelect: () => void createSubmoduleIn(scope.id) },
+        {
+          label: "重命名模块",
+          onSelect: () => void renameNode({ kind: "module", id: scope.id, name: label }),
+        },
+      ];
+    case "submodule":
+      return [
+        {
+          label: "重命名子模块",
+          onSelect: () => void renameNode({ kind: "submodule", id: scope.id, name: label }),
+        },
+      ];
+    case "unclassified":
+      return [];
+  }
+}
+
+function isScopeCurrent(scope: Scope): boolean {
+  if (scope.kind !== state.scope.kind) return false;
+  if (scope.kind === "project" || scope.kind === "unclassified") return true;
+  return scope.kind === state.scope.kind && "id" in state.scope && scope.id === state.scope.id;
+}
+
+function applyScope(scope: Scope): void {
+  state.scope = scope;
+  render();
+}
+
+function toggleNode(id: number): void {
+  if (state.collapsedNodes.has(id)) state.collapsedNodes.delete(id);
+  else state.collapsedNodes.add(id);
+  render();
+}
+
+function renderToolbar(groups: Group[]): void {
+  const inProject = state.container.kind === "project";
+  const visible = inProject ? selectScope(groups, state.scope) : groups;
+  const { done, total } = countGroups(visible);
+
+  const base = currentProject()?.name ?? "待办";
+  dom.viewTitle.textContent =
+    inProject && state.scope.kind !== "project" ? `${base} › ${scopeLabel(groups, state.scope)}` : base;
+  dom.viewCount.textContent = total === 0 ? "暂无任务" : `${done}/${total}`;
+
+  // 提示语跟着范围走：新任务会落到哪里，先写清楚，不要让人点完才知道。
+  dom.taskInput.placeholder =
+    inProject && state.scope.kind !== "project"
+      ? `添加到「${scopeLabel(groups, state.scope)}」，回车保存（优先级中）`
+      : "添加任务，回车保存（默认“未分类 / 中”）";
+}
+
+function renderTable(groups: Group[]): void {
+  dom.body.replaceChildren();
 
   // 「待办」没有模块，也就没有分组行：表格直接平铺。
   if (state.container.kind === "todo") {
-    const parents = state.tasks.filter((task) => task.parentTaskId === null);
-    for (const task of sortTasks(parents)) dom.body.append(renderTaskRow(task));
+    const parents = sortTasks(state.tasks.filter((task) => task.parentTaskId === null));
+    for (const task of parents) dom.body.append(renderTaskRow(task));
+    setEmptyState(parents.length === 0, "「待办」里还没有任务");
     return;
   }
 
-  for (const group of buildGroups(state.tasks, state.modules)) {
-    renderGroup(group, dom.body);
-  }
+  const visible = selectScope(groups, state.scope);
+  for (const group of visible) renderGroup(group, dom.body);
+
+  const { total } = countGroups(visible);
+  const where = state.scope.kind === "project" ? "这个项目" : `「${scopeLabel(groups, state.scope)}」`;
+  setEmptyState(total === 0, `${where}还没有任务`);
+}
+
+function setEmptyState(empty: boolean, message: string): void {
+  dom.empty.hidden = !empty;
+  dom.empty.textContent = empty ? `${message}。在下面输入一行，回车保存。` : "";
+}
+
+function groupKey(group: Group): string {
+  return `${group.kind}:${group.id ?? "-"}`;
 }
 
 /** 深度优先：分组行 → 组内任务 → 子分组（缩进一级）。 */
-function renderGroup(group: Group, host: HTMLElement, collapsed = false): void {
+function renderGroup(group: Group, host: HTMLElement): void {
+  const key = groupKey(group);
+  const collapsed = state.collapsedGroups.has(key);
   const { done, total } = countGroup(group);
+
   const row = el("tr", group.depth === 1 ? "row-subgroup" : "row-group");
   const cell = el("td");
   cell.colSpan = 5;
 
   const label = el("span", "group-label");
   label.style.paddingLeft = `${group.depth * 20}px`;
-  label.append(el("span", "group-caret", collapsed ? "▸" : "▾"), el("span", undefined, group.label));
 
+  const caret = el("button", collapsed ? "group-caret is-collapsed" : "group-caret");
+  caret.type = "button";
+  caret.title = collapsed ? "展开" : "收起";
+  caret.setAttribute("aria-label", caret.title);
+  caret.addEventListener("click", () => {
+    if (collapsed) state.collapsedGroups.delete(key);
+    else state.collapsedGroups.add(key);
+    render();
+  });
+
+  label.append(caret, el("span", undefined, group.label));
   if (group.children.length > 0) {
     label.append(el("span", "group-meta", `${group.children.length} 个子模块`));
   }
@@ -208,37 +452,44 @@ function renderTaskRow(task: Task): HTMLTableRowElement {
     renderPriorityCell(task),
     renderTitleCell(task),
     renderNoteCell(task),
-    el("td"), // 「…」菜单列留给归类/删除命令，本切片还没有对应命令，先不放假按钮
+    el("td"), // 「…」菜单列留给归类/删除命令，还没有对应命令，先不放假按钮
   );
   return row;
 }
 
 function renderStatusCell(task: Task): HTMLTableCellElement {
-  const cell = el("td");
-  const labels: Record<Task["status"], string> = {
-    todo: "未完成",
-    doing: "进行中",
-    done: "已完成",
-  };
-  const icon = el("span", `status status-${task.status}`);
-  // 状态格点击循环三态要等 `plan_set_status` / `apply_set_status` 落地，
-  // 这里只如实显示状态，不放一个点了没反应的控件。
-  icon.title = labels[task.status];
-  cell.append(icon);
+  const cell = el("td", "cell-status");
+  const button = el("button", `status status-${task.status}`);
+  button.type = "button";
+  button.title = `${STATUS_LABELS[task.status]} → 点一下改为${STATUS_LABELS[NEXT_STATUS[task.status]]}`;
+  button.setAttribute("aria-label", `状态：${STATUS_LABELS[task.status]}`);
+  button.addEventListener("click", () => {
+    void cycleStatus(task);
+  });
+  cell.append(button);
   return cell;
 }
 
 function renderPriorityCell(task: Task): HTMLTableCellElement {
-  const cell = el("td");
-  const labels: Record<Task["priority"], string> = { high: "高", mid: "中", low: "低" };
-  const chip = el("span", `priority priority-${task.priority}`, labels[task.priority]);
-  cell.append(chip);
+  const cell = el("td", "cell-priority");
+  const button = el("button", `priority priority-${task.priority}`, PRIORITY_LABELS[task.priority]);
+  button.type = "button";
+  button.title = `优先级${PRIORITY_LABELS[task.priority]}（点击选择）`;
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  button.addEventListener("click", () => {
+    openPriorityPicker(button, task);
+  });
+  cell.append(button);
   return cell;
 }
 
 function renderTitleCell(task: Task): HTMLTableCellElement {
   const cell = el("td", "cell-title");
-  cell.append(el("span", "task-title", task.title));
+  const title = el("span", "task-title", task.title);
+  title.title = "双击改名";
+  title.addEventListener("dblclick", () => beginRename(cell, task));
+  cell.append(title);
   return cell;
 }
 
@@ -247,6 +498,335 @@ function renderNoteCell(task: Task): HTMLTableCellElement {
   const note = task.note.trim();
   cell.append(el("span", note ? "note" : "note is-empty", note || "—"));
   return cell;
+}
+
+// ---------------------------------------------------------------------------
+// 写操作（格内编辑）
+// ---------------------------------------------------------------------------
+
+/** 状态格循环：plan 先问"要不要确认"，needs_confirm 为真才弹窗，再 apply。 */
+async function cycleStatus(task: Task): Promise<void> {
+  const next = NEXT_STATUS[task.status];
+  try {
+    const plan = await api.planSetStatus(task.id, next);
+    let cascade = false;
+
+    if (plan.needsConfirm) {
+      const confirmed = await askConfirm({
+        title: `标记为${STATUS_LABELS[next]}？`,
+        body: plan.reason,
+        confirmText: `一并完成 ${plan.affects.length - 1} 个`,
+      });
+      if (!confirmed) return;
+      cascade = true;
+    }
+
+    const outcome = await api.applySetStatus(task.id, next, cascade);
+    await reload();
+    for (const notice of outcome.notices) showNotice(notice);
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
+
+/** 优先级浮窗。改完行会按组内排序跳走，给新位置一次短暂高亮。 */
+let picker: HTMLElement | null = null;
+
+function openPriorityPicker(anchor: HTMLButtonElement, task: Task): void {
+  // 再点一次同一个格子就收起（按钮语义）
+  if (picker && anchor.dataset.pickerAnchor === "open") {
+    closePriorityPicker();
+    return;
+  }
+  closePriorityPicker();
+
+  const menu = el("div", "picker");
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "优先级");
+
+  for (const priority of PRIORITY_ORDER) {
+    const current = priority === task.priority;
+    const item = el("button", current ? "picker-item is-current" : "picker-item");
+    item.type = "button";
+    item.setAttribute("role", "menuitemradio");
+    item.setAttribute("aria-checked", String(current));
+    item.append(el("span", `picker-dot picker-dot-${priority}`), el("span", undefined, PRIORITY_LABELS[priority]));
+    if (current) item.append(el("span", "picker-check", "✓"));
+    item.addEventListener("click", () => {
+      closePriorityPicker();
+      if (!current) void applyPriority(task, priority);
+    });
+    menu.append(item);
+  }
+
+  // 浮窗挂在 body 上：表格容器有 overflow，挂在格子里会被裁掉。
+  document.body.append(menu);
+
+  const rect = anchor.getBoundingClientRect();
+  const { offsetWidth: width, offsetHeight: height } = menu;
+  const flipUp = rect.bottom + 4 + height > window.innerHeight;
+  menu.style.top = `${Math.round(flipUp ? rect.top - 4 - height : rect.bottom + 4)}px`;
+  menu.style.left = `${Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)))}px`;
+
+  picker = menu;
+  anchor.dataset.pickerAnchor = "open";
+  anchor.setAttribute("aria-expanded", "true");
+  menu.querySelector<HTMLButtonElement>(".is-current")?.focus();
+
+  menu.addEventListener("keydown", movePickerFocus);
+  document.addEventListener("mousedown", onPickerOutside);
+  document.addEventListener("keydown", onPickerKeydown);
+  window.addEventListener("scroll", closePriorityPicker, { capture: true, once: true });
+}
+
+function closePriorityPicker(): void {
+  if (!picker) return;
+  picker.remove();
+  picker = null;
+
+  const anchor = document.querySelector<HTMLButtonElement>('[data-picker-anchor="open"]');
+  if (anchor) {
+    delete anchor.dataset.pickerAnchor;
+    anchor.setAttribute("aria-expanded", "false");
+  }
+
+  document.removeEventListener("mousedown", onPickerOutside);
+  document.removeEventListener("keydown", onPickerKeydown);
+  window.removeEventListener("scroll", closePriorityPicker, { capture: true });
+}
+
+function onPickerOutside(event: MouseEvent): void {
+  if (picker && event.target instanceof Node && picker.contains(event.target)) return;
+  closePriorityPicker();
+}
+
+function onPickerKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    // 焦点还给打开它的那个格子，键盘用户不至于掉到 body 上
+    const anchor = document.querySelector<HTMLButtonElement>('[data-picker-anchor="open"]');
+    closePriorityPicker();
+    anchor?.focus();
+  }
+}
+
+function movePickerFocus(event: KeyboardEvent): void {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const items = [...(picker?.querySelectorAll<HTMLButtonElement>(".picker-item") ?? [])];
+  if (items.length === 0) return;
+  event.preventDefault();
+
+  const index = items.indexOf(document.activeElement as HTMLButtonElement);
+  const step = event.key === "ArrowDown" ? 1 : -1;
+  items[(index + step + items.length) % items.length].focus();
+}
+
+async function applyPriority(task: Task, priority: Priority): Promise<void> {
+  try {
+    await api.setPriority(task.id, priority);
+    await reload();
+    flashRow(task.id);
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
+
+/** 就地改名：单元格原位换成输入框，回车存、Esc 取消。 */
+function beginRename(cell: HTMLTableCellElement, task: Task): void {
+  if (cell.querySelector(".title-input")) return;
+
+  const input = el("input", "title-input");
+  input.value = task.title;
+  input.spellcheck = false;
+  cell.replaceChildren(input);
+  input.focus();
+  input.select();
+
+  // 回车与失焦可能先后发生，只认第一个结果。
+  let settled = false;
+  const finish = (commit: boolean): void => {
+    if (settled) return;
+    settled = true;
+
+    const next = input.value.trim();
+    // 空值或没改：还原原文，不入库（后端也会拒，但没必要发这一趟）。
+    if (!commit || next === "" || next === task.title) {
+      render();
+      return;
+    }
+    void commitRename(task, next);
+  };
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+
+  // 点别处也算改完：在表格里换焦点是最常见的"我好了"的动作，
+  // 这里丢掉刚打的字比多存一次更糟。Esc 仍是唯一的"不要了"。
+  input.addEventListener("blur", () => finish(true));
+}
+
+async function commitRename(task: Task, title: string): Promise<void> {
+  try {
+    await api.renameTask(task.id, title);
+    await reload();
+  } catch (error) {
+    showNotice(describe(error), "error");
+    render(); // 失败也要把输入框收回去，不能停在一半的状态
+  }
+}
+
+/** 改完优先级后，让被移动的那一行在新位置闪一下，免得"行跳走了找不着"。 */
+function flashRow(taskId: number): void {
+  const row = dom.body.querySelector<HTMLTableRowElement>(`tr[data-task-id="${taskId}"]`);
+  row?.classList.add("just-moved");
+}
+
+// ---------------------------------------------------------------------------
+// 确认框 / 输入框（同一个 modal）
+// ---------------------------------------------------------------------------
+
+/** 每次弹窗前先把上一回的形态抹干净：确认框与输入框共用这一个 modal。 */
+function resetModal(): void {
+  dom.modalBody.hidden = false;
+  dom.modalBody.textContent = "";
+  dom.modalField.hidden = true;
+  dom.modalInput.value = "";
+}
+
+/**
+ * 当前打开的弹窗的“取消”入口。
+ *
+ * 同一个 modal 只允许有一个主人：新弹窗会先把旧弹窗按取消收场，
+ * 否则两个 `await` 会同时悬着、抢同一批 DOM 监听，一次回车跑两个命令。
+ */
+let dismissActiveDialog: (() => void) | null = null;
+
+function beginDialog(): void {
+  dismissActiveDialog?.();
+}
+
+function endDialog(): void {
+  dismissActiveDialog = null;
+}
+
+interface ConfirmOptions {
+  title: string;
+  body: string;
+  confirmText: string;
+}
+
+/** 「先告知影响、再确认」的通用形状。返回 Promise，调用处直接 await。 */
+function askConfirm(options: ConfirmOptions): Promise<boolean> {
+  return new Promise((resolve) => {
+    beginDialog();
+    resetModal();
+    dom.modalTitle.textContent = options.title;
+    dom.modalBody.textContent = options.body;
+    dom.modalOk.textContent = options.confirmText;
+    dom.modal.hidden = false;
+    dom.modalOk.focus();
+
+    const close = (result: boolean): void => {
+      endDialog();
+      dom.modal.hidden = true;
+      dom.modalOk.removeEventListener("click", onOk);
+      dom.modalCancel.removeEventListener("click", onCancel);
+      dom.modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey);
+      resolve(result);
+    };
+    const onOk = (): void => close(true);
+    const onCancel = (): void => close(false);
+    const onBackdrop = (event: MouseEvent): void => {
+      if (event.target === dom.modal) close(false);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") close(false);
+    };
+
+    dom.modalOk.addEventListener("click", onOk);
+    dom.modalCancel.addEventListener("click", onCancel);
+    dom.modal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey);
+
+    dismissActiveDialog = onCancel;
+  });
+}
+
+interface TextOptions {
+  title: string;
+  /** 输入框上方的小字，通常写"旧名字 → 新名字" */
+  label: string;
+  value: string;
+  confirmText: string;
+}
+
+/** 单个文本输入的弹窗。取消返回 `null`，确认返回 trim 过的非空字符串。 */
+function askText(options: TextOptions): Promise<string | null> {
+  return new Promise((resolve) => {
+    beginDialog();
+    resetModal();
+    dom.modalTitle.textContent = options.title;
+    dom.modalBody.hidden = true;
+    dom.modalField.hidden = false;
+    dom.modalLabel.textContent = options.label;
+    dom.modalInput.value = options.value;
+    dom.modalOk.textContent = options.confirmText;
+    dom.modal.hidden = false;
+    dom.modalInput.focus();
+    dom.modalInput.select();
+
+    const close = (result: string | null): void => {
+      endDialog();
+      dom.modal.hidden = true;
+      dom.modalOk.removeEventListener("click", onSubmit);
+      dom.modalCancel.removeEventListener("click", onCancel);
+      dom.modal.removeEventListener("click", onBackdrop);
+      dom.modalInput.removeEventListener("keydown", onInputKey);
+      document.removeEventListener("keydown", onKey);
+      resolve(result);
+    };
+
+    // 空白名不关窗也不出库：关掉等于让用户以为改成了空名字
+    const submit = (): void => {
+      const value = dom.modalInput.value.trim();
+      if (value === "") {
+        dom.modalInput.focus();
+        return;
+      }
+      close(value);
+    };
+
+    const onSubmit = (): void => submit();
+    const onCancel = (): void => close(null);
+    const onBackdrop = (event: MouseEvent): void => {
+      if (event.target === dom.modal) close(null);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") close(null);
+    };
+    const onInputKey = (event: KeyboardEvent): void => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        submit();
+      }
+    };
+
+    dom.modalOk.addEventListener("click", onSubmit);
+    dom.modalCancel.addEventListener("click", onCancel);
+    dom.modal.addEventListener("click", onBackdrop);
+    dom.modalInput.addEventListener("keydown", onInputKey);
+    document.addEventListener("keydown", onKey);
+
+    dismissActiveDialog = onCancel;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -263,17 +843,6 @@ dom.projectForm.addEventListener("submit", (event) => {
   void createProject();
 });
 
-dom.moduleAdd.addEventListener("click", () => {
-  dom.moduleAdd.hidden = true;
-  dom.moduleForm.hidden = false;
-  dom.moduleInput.focus();
-});
-
-dom.moduleForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  void createModule();
-});
-
 dom.taskForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void createTask();
@@ -287,37 +856,87 @@ async function createProject(): Promise<void> {
     dom.projectInput.value = "";
     dom.projectForm.hidden = true;
     if (created.id !== null) state.container = { kind: "project", id: created.id };
+    state.scope = { kind: "project" };
     await reload();
   } catch (error) {
     showNotice(describe(error), "error");
   }
 }
 
-async function createModule(): Promise<void> {
-  if (state.container.kind !== "project") return;
-  const container = state.container;
-  const name = dom.moduleInput.value.trim();
-  if (!name) return;
+async function createModuleIn(projectId: number): Promise<void> {
+  const name = await askText({
+    title: "新建模块",
+    label: "模块名",
+    value: "",
+    confirmText: "创建",
+  });
+  if (name === null) return;
+
   try {
-    await api.createModule(container.id, name);
-    closeModuleForm();
+    await api.createModule(projectId, name);
+    // 在别的项目里建的：把视图切过去，否则看不到自己刚建的东西
+    const project = state.projects.find((p) => p.id === projectId);
+    if (project && !isCurrent(project)) {
+      await selectProject(project);
+      return;
+    }
     await reload();
   } catch (error) {
     showNotice(describe(error), "error");
   }
 }
 
-function closeModuleForm(): void {
-  dom.moduleInput.value = "";
-  dom.moduleForm.hidden = true;
-  dom.moduleAdd.hidden = state.container.kind !== "project";
+async function createSubmoduleIn(moduleId: number): Promise<void> {
+  const name = await askText({
+    title: "新建子模块",
+    label: "子模块名",
+    value: "",
+    confirmText: "创建",
+  });
+  if (name === null) return;
+
+  try {
+    await api.createSubmodule(moduleId, name);
+    // 刚加完就看不见它，等于没加：顺手把这层展开
+    state.collapsedNodes.delete(moduleId);
+    await reload();
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
+
+interface RenameTarget {
+  kind: "project" | "module" | "submodule";
+  id: number;
+  name: string;
+}
+
+async function renameNode(target: RenameTarget): Promise<void> {
+  const name = await askText({
+    title: "重命名",
+    label: `${target.name} → 新名字`,
+    value: target.name,
+    confirmText: "保存",
+  });
+  if (name === null || name === target.name) return;
+
+  try {
+    if (target.kind === "project") await api.renameProject(target.id, name);
+    else if (target.kind === "module") await api.renameModule(target.id, name);
+    else await api.renameSubmodule(target.id, name);
+    await reload();
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
 }
 
 async function createTask(): Promise<void> {
   const title = dom.taskInput.value.trim();
   if (!title) return;
   try {
-    await api.createTask(state.container, title);
+    // 新任务跟着当前范围走：选模块就进模块，选子模块就进子模块。
+    const target = resolveTarget(buildGroups(state.tasks, state.modules), state.scope);
+    await api.createTask(state.container, target, title);
     dom.taskInput.value = "";
     await reload();
   } catch (error) {
@@ -338,9 +957,12 @@ function showNotice(message: string, kind: "info" | "error" = "info"): void {
   dom.notice.hidden = false;
 
   window.clearTimeout(noticeTimer);
-  noticeTimer = window.setTimeout(() => {
-    dom.notice.hidden = true;
-  }, kind === "error" ? 8000 : 3000);
+  noticeTimer = window.setTimeout(
+    () => {
+      dom.notice.hidden = true;
+    },
+    kind === "error" ? 8000 : 3000,
+  );
 }
 
 /** 命令失败时 Tauri 抛的是后端那个 `String`，这里只负责把它变成一句话。 */
@@ -354,7 +976,15 @@ function describe(error: unknown): string {
 // 启动
 // ---------------------------------------------------------------------------
 
-window.addEventListener("DOMContentLoaded", () => {
+// 模块脚本通常早于 DOMContentLoaded 执行，但如果它被一个带 await 的入口 import，
+// 事件可能已经闪过去了。两种时机都要能起来。
+if (document.readyState === "loading") {
+  window.addEventListener("DOMContentLoaded", boot);
+} else {
+  boot();
+}
+
+function boot(): void {
   render();
   void reload();
-});
+}

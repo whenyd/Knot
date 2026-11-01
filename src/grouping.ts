@@ -1,10 +1,10 @@
 /**
- * 数据管线里"算"的那一段：排序、分组。纯函数，不碰 DOM、不发命令。
+ * 数据管线里"算"的那一段：排序、分组、范围筛选。纯函数，不碰 DOM、不发命令。
  *
  * 之所以放在前端而不是 SQL：任务量在本机是小规模，前端算足够快，
  * 也免得为"分组 × 筛选 × 排序"的每种组合写一条查询。
  */
-import type { Module, Priority, Task } from "./api";
+import type { Module, Priority, ScopeTarget, Task } from "./api";
 
 /** 组内排序：优先级 高 → 中 → 低，同优先级按添加顺序（新的在下）。 */
 const PRIORITY_RANK: Record<Priority, number> = { high: 0, mid: 1, low: 2 };
@@ -16,15 +16,23 @@ export function sortTasks(tasks: readonly Task[]): Task[] {
 }
 
 /**
- * 一个分组（模块、子模块，或「未分类」）。
+ * 主视图的范围：整个项目 / 某个模块 / 某个子模块 / 未分类。
  *
- * 分组行与任务行是同一种"行"，区别只在 `depth` 和有没有 `tasks`——
- * 这样渲染器只需要走一遍树的深度优先。
+ * 「待办」没有这层树，所以它不出现在这里——待办视图恒为整个容器。
  */
+export type Scope =
+  | { kind: "project" }
+  | { kind: "module"; id: number }
+  | { kind: "submodule"; id: number }
+  | { kind: "unclassified" };
+
+/** 一个分组（模块、子模块，或「未分类」）。 */
 export interface Group {
-  key: string;
+  kind: "module" | "submodule" | "unclassified";
+  /** 「未分类」是派生分组，没有 id。 */
+  id: number | null;
   label: string;
-  /** 0 = 模块；1 = 子模块（缩进一级）。 */
+  /** 0 = 模块（或提升为范围的子模块）；1 = 缩进一级的子模块。 */
   depth: 0 | 1;
   tasks: Task[];
   children: Group[];
@@ -53,15 +61,17 @@ export function buildGroups(tasks: readonly Task[], modules: readonly Module[]):
 
   const take = (key: string) => sortTasks(store.get(key) ?? []);
 
-  // 模块分组一律保留，即使暂时是 0/0：本切片还没有"移动到模块"的命令，
-  // 若把空模块藏起来，新建模块就会看起来毫无反应。
+  // 用户建的模块与子模块一律保留，即使暂时是 0/0：它们是结构，
+  // 藏起来会让人以为没建成；「未分类」是派生分组，空时不占一行。
   const groups: Group[] = modules.map((module) => ({
-    key: `module-${module.id}`,
+    kind: "module",
+    id: module.id,
     label: module.name,
     depth: 0,
     tasks: take(`module-${module.id}`),
     children: module.submodules.map((submodule) => ({
-      key: `submodule-${submodule.id}`,
+      kind: "submodule",
+      id: submodule.id,
       label: submodule.name,
       depth: 1,
       tasks: take(`submodule-${submodule.id}`),
@@ -69,11 +79,11 @@ export function buildGroups(tasks: readonly Task[], modules: readonly Module[]):
     })),
   }));
 
-  // 「未分类」是固定分组，排最后；没有任务就不占一行。
   const unclassified = take("unclassified");
   if (unclassified.length > 0) {
     groups.push({
-      key: "unclassified",
+      kind: "unclassified",
+      id: null,
       label: "未分类",
       depth: 0,
       tasks: unclassified,
@@ -84,7 +94,7 @@ export function buildGroups(tasks: readonly Task[], modules: readonly Module[]):
   return groups;
 }
 
-/** 分组行计数：只算父任务。`done` / `total`。 */
+/** 分组行计数：只算父任务。`done` / `total`，含子分组。 */
 export function countGroup(group: Group): { done: number; total: number } {
   let done = 0;
   let total = 0;
@@ -97,4 +107,85 @@ export function countGroup(group: Group): { done: number; total: number } {
   };
   walk(group);
   return { done, total };
+}
+
+/** 一组分组的合计计数。 */
+export function countGroups(groups: readonly Group[]): { done: number; total: number } {
+  return groups.reduce(
+    (sum, group) => {
+      const { done, total } = countGroup(group);
+      return { done: sum.done + done, total: sum.total + total };
+    },
+    { done: 0, total: 0 },
+  );
+}
+
+/**
+ * 把范围套到分组树上。
+ *
+ * 范围的根就是视图的根：选中某个子模块时它自己成了最外层，不再缩进；
+ * 选中模块时保留它的子模块（子树的形状不变）。
+ */
+export function selectScope(groups: readonly Group[], scope: Scope): Group[] {
+  switch (scope.kind) {
+    case "project":
+      return [...groups];
+    case "module":
+      return groups.filter((group) => group.kind === "module" && group.id === scope.id);
+    case "unclassified":
+      return groups.filter((group) => group.kind === "unclassified");
+    case "submodule": {
+      for (const group of groups) {
+        const child = group.children.find(
+          (node) => node.kind === "submodule" && node.id === scope.id,
+        );
+        if (child) return [{ ...child, depth: 0 }];
+      }
+      return [];
+    }
+  }
+}
+
+/** 范围在左栏的显示名。 */
+export function scopeLabel(groups: readonly Group[], scope: Scope): string {
+  switch (scope.kind) {
+    case "project":
+      return "全部";
+    case "unclassified":
+      return "未分类";
+    case "module":
+      return groups.find((g) => g.kind === "module" && g.id === scope.id)?.label ?? "模块";
+    case "submodule":
+      for (const group of groups) {
+        const child = group.children.find((n) => n.kind === "submodule" && n.id === scope.id);
+        if (child) return child.label;
+      }
+      return "子模块";
+  }
+}
+
+/**
+ * 当前范围对应的任务归属：新建任务就落在这里。
+ *
+ * “全部”与“未分类”都是没有分类的位置，新任务自然进未分类。
+ */
+export function resolveTarget(groups: readonly Group[], scope: Scope): ScopeTarget {
+  switch (scope.kind) {
+    case "project":
+    case "unclassified":
+      return { moduleId: null, submoduleId: null };
+    case "module":
+      return { moduleId: scope.id, submoduleId: null };
+    case "submodule": {
+      // 子模块必须连同它的模块一起报上去
+      for (const group of groups) {
+        if (group.kind !== "module" || group.id === null) continue;
+        const owns = group.children.some(
+          (child) => child.kind === "submodule" && child.id === scope.id,
+        );
+        if (owns) return { moduleId: group.id, submoduleId: scope.id };
+      }
+      return { moduleId: null, submoduleId: null };
+    }
+  }
 }

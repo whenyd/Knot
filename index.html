@@ -26,21 +26,17 @@
           />
         </form>
         <button class="side-add" id="project-add" type="button">＋ 新建项目</button>
+
+        <!-- 范围树：全部 / 模块 / 子模块 / 未分类。「待办」没有这层。
+             新建与重命名的入口都在右键菜单里，这里不再摆按钮。 -->
+        <div class="side-heading" id="scope-heading">范围</div>
+        <nav class="side-group" id="scope-section"></nav>
       </aside>
 
       <main class="main">
         <header class="toolbar">
           <h1 class="view-title" id="view-title">待办</h1>
           <span class="badge" id="view-count"></span>
-          <button class="ghost" id="module-add" type="button" hidden>＋ 模块</button>
-          <form class="inline-form" id="module-form" hidden>
-            <input
-              id="module-input"
-              placeholder="模块名，回车创建"
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </form>
         </header>
 
         <div class="grid-scroll">
@@ -78,5 +74,23 @@
     </div>
 
     <div class="notice" id="notice" role="status" hidden></div>
+
+    <!-- 确认框：
+         「先告知影响条数再确认」是全局形状，删除、级联完成都走它。
+         不用 window.confirm：那是浏览器的原生对话框，样式与键盘行为都不受控。 -->
+    <div class="modal" id="modal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <h2 class="modal-title" id="modal-title"></h2>
+        <p class="modal-body" id="modal-body"></p>
+        <label class="modal-field" id="modal-field" hidden>
+          <span class="modal-label" id="modal-label"></span>
+          <input class="modal-input" id="modal-input" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="modal-actions">
+          <button class="btn" id="modal-cancel" type="button">取消</button>
+          <button class="btn btn-primary" id="modal-ok" type="button"></button>
+        </div>
+      </div>
+    </div>
   </body>
 </html>
