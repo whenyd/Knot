@@ -833,9 +833,35 @@ function askText(options: TextOptions): Promise<string | null> {
 // 事件
 // ---------------------------------------------------------------------------
 
+/**
+ * 内联新建项目表单的"收回去"：隐藏 + 清空。
+ *
+ * 提交成功与点外面 / Esc 走同一个出口——只留一种收场方式，免得三种状态
+ * （开着有字、开着没字、关着）各自漂移。
+ */
+function resetProjectForm(): void {
+  dom.projectForm.hidden = true;
+  dom.projectInput.value = "";
+  document.removeEventListener("mousedown", onProjectFormOutside);
+}
+
+/** 表单外的任何一次按下都把它收回去；按下（而非点击）才算，免得拖选文字也被当成"我不要了"。 */
+function onProjectFormOutside(event: MouseEvent): void {
+  if (event.target instanceof Node && dom.projectForm.contains(event.target)) return;
+  resetProjectForm();
+}
+
 dom.projectAdd.addEventListener("click", () => {
   dom.projectForm.hidden = false;
   dom.projectInput.focus();
+  document.addEventListener("mousedown", onProjectFormOutside);
+});
+
+dom.projectInput.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    resetProjectForm();
+  }
 });
 
 dom.projectForm.addEventListener("submit", (event) => {
@@ -853,8 +879,7 @@ async function createProject(): Promise<void> {
   if (!name) return;
   try {
     const created = await api.createProject(name);
-    dom.projectInput.value = "";
-    dom.projectForm.hidden = true;
+    resetProjectForm();
     if (created.id !== null) state.container = { kind: "project", id: created.id };
     state.scope = { kind: "project" };
     await reload();
