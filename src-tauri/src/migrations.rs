@@ -7,7 +7,11 @@ use rusqlite::Connection;
 /// 顺序执行的迁移脚本。索引 `i` 的脚本把库从版本 `i` 推到 `i + 1`。
 ///
 /// 追加新条目即可；已发布的条目一个字都不要改。
-pub const MIGRATIONS: &[&str] = &[V1_INITIAL_SCHEMA, V2_TASK_CLASSIFICATION_CASCADE];
+pub const MIGRATIONS: &[&str] = &[
+    V1_INITIAL_SCHEMA,
+    V2_TASK_CLASSIFICATION_CASCADE,
+    V3_CLAMP_SUBTASK_PRIORITY,
+];
 
 /// v1：项目 / 模块 / 子模块 / 任务，两层分类 + 一层子任务。
 const V1_INITIAL_SCHEMA: &str = r#"
@@ -79,6 +83,33 @@ ALTER TABLE task_v2 RENAME TO task;
 CREATE INDEX idx_task_project ON task(project_id);
 CREATE INDEX idx_task_module  ON task(module_id);
 CREATE INDEX idx_task_parent  ON task(parent_task_id);
+"#;
+
+/// v3：把旧数据里高于父任务的子任务降到父任务的档位。
+/// 规则从这一版起由 `domain::set_priority` 保证；迁移只负责把历史数据拉回合法状态。
+const V3_CLAMP_SUBTASK_PRIORITY: &str = r#"
+UPDATE task
+SET priority = (
+  SELECT parent.priority
+  FROM task AS parent
+  WHERE parent.id = task.parent_task_id
+)
+WHERE parent_task_id IS NOT NULL
+  AND (
+    CASE priority
+      WHEN 'high' THEN 3
+      WHEN 'mid'  THEN 2
+      ELSE 1
+    END
+  ) > (
+    SELECT CASE parent.priority
+             WHEN 'high' THEN 3
+             WHEN 'mid'  THEN 2
+             ELSE 1
+           END
+    FROM task AS parent
+    WHERE parent.id = task.parent_task_id
+  );
 "#;
 
 /// 把库推到最新版本。已经是最新就什么都不做。
@@ -229,7 +260,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(count(&conn, "task"), 3);
         assert_eq!(count(&conn, "submodule"), 1);
 
@@ -253,5 +284,49 @@ mod tests {
         assert_eq!(count(&conn, "task"), 1, "组内任务应随模块一起删除");
         assert_eq!(count(&conn, "submodule"), 0);
         check_foreign_keys(&conn).unwrap();
+    }
+
+    /// v3 把旧数据里高于父任务的子任务降到父任务档位；合法的子任务不动。
+    #[test]
+    fn v3_clamps_children_to_parent_priority() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+        conn.execute_batch(
+            "INSERT INTO task (id, title, priority) VALUES (1, '低父', 'low');
+             INSERT INTO task (id, parent_task_id, title, priority)
+                    VALUES (2, 1, '高子', 'high');
+             INSERT INTO task (id, title, priority) VALUES (3, '高父', 'high');
+             INSERT INTO task (id, parent_task_id, title, priority)
+                    VALUES (4, 3, '低子', 'low');
+             INSERT INTO task (id, title, priority) VALUES (5, '中父', 'mid');
+             INSERT INTO task (id, parent_task_id, title, priority)
+                    VALUES (6, 5, '中子', 'mid');",
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let priorities: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, priority FROM task ORDER BY id")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap();
+            rows.map(|row| row.unwrap()).collect()
+        };
+        assert_eq!(
+            priorities,
+            vec![
+                (1, "low".to_string()),
+                (2, "low".to_string()),
+                (3, "high".to_string()),
+                (4, "low".to_string()),
+                (5, "mid".to_string()),
+                (6, "mid".to_string()),
+            ]
+        );
     }
 }

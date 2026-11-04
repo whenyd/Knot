@@ -423,10 +423,11 @@ function renderToolbar(groups: Group[]): void {
   dom.viewCount.textContent = total === 0 ? "暂无任务" : `${done}/${total}`;
 
   // 提示语跟着范围走：新任务会落到哪里，先写清楚，不要让人点完才知道。
-  dom.taskInput.placeholder =
-    inProject && state.scope.kind !== "project"
-      ? `添加到「${scopeLabel(groups, state.scope)}」，回车保存（优先级中）`
-      : "添加任务，回车保存（默认“未分类 / 中”）";
+  // 「全部」与「未分类」的新任务都进未分类，提示也保持一致。
+  const target = state.scope.kind === "project" ? "未分类" : scopeLabel(groups, state.scope);
+  dom.taskInput.placeholder = inProject
+    ? `添加到「${target}」，回车保存（优先级中）`
+    : "添加任务，回车保存（默认“未分类 / 中”）";
 }
 
 function currentFilters(): TaskFilters {
@@ -639,7 +640,11 @@ function renderGroup(
 
 interface TaskRowOptions {
   isChild: boolean;
+  /** 当前筛选下会显示的子任务数，决定是否画折叠箭头。 */
   childCount: number;
+  /** 子任务完成计数始终按全部子任务算，不受筛选影响。 */
+  childDone: number;
+  childTotal: number;
   isContext?: boolean;
 }
 
@@ -662,13 +667,17 @@ function renderTaskTree(
     renderTaskRow(task, {
       isChild: false,
       childCount: matchingChildren.length,
+      childDone: children.filter((child) => child.status === "done").length,
+      childTotal: children.length,
       isContext: !parentMatches,
     }),
   );
 
   if (!state.collapsedTasks.has(task.id)) {
     for (const child of matchingChildren) {
-      host.append(renderTaskRow(child, { isChild: true, childCount: 0 }));
+      host.append(
+        renderTaskRow(child, { isChild: true, childCount: 0, childDone: 0, childTotal: 0 }),
+      );
     }
   }
 
@@ -712,7 +721,10 @@ function renderPriorityCell(task: Task): HTMLTableCellElement {
   const cell = el("td", "cell-priority");
   const button = el("button", `priority priority-${task.priority}`, PRIORITY_LABELS[task.priority]);
   button.type = "button";
-  button.title = `优先级${PRIORITY_LABELS[task.priority]}（点击选择）`;
+  button.title =
+    task.parentTaskId === null
+      ? `优先级${PRIORITY_LABELS[task.priority]}（点击选择）`
+      : `优先级${PRIORITY_LABELS[task.priority]}（点击选择；不能高于父任务）`;
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");
   button.addEventListener("click", () => {
@@ -755,6 +767,12 @@ function renderTitleCell(task: Task, options: TaskRowOptions): HTMLTableCellElem
 
   wrap.append(title);
 
+  if (options.childTotal > 0) {
+    const count = el("span", "task-count", `${options.childDone}/${options.childTotal}`);
+    count.title = `子任务已完成 ${options.childDone} 个，共 ${options.childTotal} 个`;
+    wrap.append(count);
+  }
+
   const plus = el("button", "subtask-add", "＋");
   plus.type = "button";
   plus.title = "添加子任务";
@@ -796,7 +814,7 @@ function renderSubtaskAddRow(parent: Task): HTMLTableRowElement {
 
   const input = el("input", "subtask-input");
   input.value = subtaskDraft;
-  input.placeholder = `给「${parent.title}」添加子任务，回车保存`;
+  input.placeholder = "添加子任务，回车保存";
   input.autocomplete = "off";
   input.spellcheck = false;
 
@@ -1072,8 +1090,18 @@ async function cycleStatus(task: Task): Promise<void> {
 
 /** 优先级浮窗。改完行会按组内排序跳走，给新位置一次短暂高亮。 */
 function openPriorityMenu(anchor: HTMLButtonElement, task: Task): void {
+  // 子任务的可选档位以父任务为上限：更高的选项根本不出现。
+  const parent =
+    task.parentTaskId === null
+      ? null
+      : (state.tasks.find((candidate) => candidate.id === task.parentTaskId) ?? null);
+  const choices =
+    parent === null
+      ? PRIORITY_ORDER
+      : PRIORITY_ORDER.slice(PRIORITY_ORDER.indexOf(parent.priority));
+
   openMenu({
-    items: PRIORITY_ORDER.map((priority) => ({
+    items: choices.map((priority) => ({
       label: PRIORITY_LABELS[priority],
       dot: PRIORITY_DOTS[priority],
       checked: priority === task.priority,
@@ -1088,9 +1116,20 @@ function openPriorityMenu(anchor: HTMLButtonElement, task: Task): void {
 }
 
 async function applyPriority(task: Task, priority: Priority): Promise<void> {
+  // 降到比某些子任务还低时，后端会把它们一并降档；先数一下，回来给条提示。
+  const cascaded =
+    task.parentTaskId === null
+      ? state.tasks.filter(
+          (child) =>
+            child.parentTaskId === task.id &&
+            PRIORITY_ORDER.indexOf(child.priority) < PRIORITY_ORDER.indexOf(priority),
+        ).length
+      : 0;
+
   try {
     await api.setPriority(task.id, priority);
     await reload();
+    if (cascaded > 0) showNotice(`已同步下调 ${cascaded} 个子任务的优先级`);
     flashRow(task.id);
   } catch (error) {
     showNotice(describe(error), "error");

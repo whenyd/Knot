@@ -72,6 +72,7 @@ CREATE INDEX idx_task_parent  ON task(parent_task_id);
 
 - **「待办」不是一行项目记录**，而是 `project_id IS NULL`。省掉一条"永远存在的系统记录"，也让"项目列表"查询天然干净。
 - **子任务不存 `module_id`/`submodule_id`**（恒为 NULL）。子任务跟随父任务、不能单独移动，所以归属的唯一真相在父任务上；冗余一份只会漂移。
+- **子任务优先级不高于父任务**：新建子任务默认"中"，父任务更低时取父任务的档位；把子任务调到高于父任务会被拒绝；父任务降档时，同一事务内把仍高于它的子任务一并降档。历史数据由 v3 迁移归一。
 - **状态与优先级存文本而非整数**，用 `CHECK` 约束。库文件是给人看的，`'doing'` 比 `1` 好读，值集合也由 `CHECK` 兜住。
 - **"只允许一层子任务"无法用 `CHECK` 表达**（SQLite 的 CHECK 不支持子查询），由 `domain.rs` 在创建时保证。
 - 外键级联一律是"删父带走子"：删项目带走它的模块与任务，删模块带走它的子模块与任务，删任务带走它的子任务。**删除模块时组内的任务是真的被删掉，不是"退回未分类"**（两者都是数据，但只有一个是可恢复的，所以删除一律走 `plan_*` 先告知条数）。
@@ -125,7 +126,7 @@ list_tasks(container)                 -> [task]   // container = { kind: 'todo' 
 create_task({ container, module_id?, submodule_id?, parent_task_id?, title }) -> { task, notices }
 rename_task(id, title)                              // 就地编辑；trim 后为空则拒绝
 set_note(id, note)
-set_priority(id, priority)
+set_priority(id, priority)                            // 子任务不能高于父任务；父任务降档级联下调子任务
 move_task(id, { container, module_id?, submodule_id? })   // 同容器或跨容器
 
 // 写 · 状态（两段式）

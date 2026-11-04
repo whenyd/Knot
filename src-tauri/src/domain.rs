@@ -70,6 +70,24 @@ impl Priority {
             other => Err(format!("未知的优先级值 {other:?}")),
         }
     }
+
+    /// 数字越大优先级越高。判断“子任务不能高过父任务”只比较这个。
+    fn rank(self) -> u8 {
+        match self {
+            Priority::High => 3,
+            Priority::Mid => 2,
+            Priority::Low => 1,
+        }
+    }
+
+    /// 严格高于 `self` 的档位，用于父任务降档时级联下调子任务。
+    fn above(self) -> &'static [Priority] {
+        match self {
+            Priority::High => &[],
+            Priority::Mid => &[Priority::High],
+            Priority::Low => &[Priority::High, Priority::Mid],
+        }
+    }
 }
 
 /// 任务所在的容器：虚拟的「待办」，或某个真实项目。
@@ -388,7 +406,8 @@ pub fn rename_submodule(conn: &Connection, id: i64, name: &str) -> Res<Submodule
 ///
 /// 子任务的归属真相在父任务上：容器必须与父任务一致，`module_id`/`submodule_id`
 /// 一律落 NULL（调用方传了也忽略）；排序号按父任务下的子任务单独排队。
-/// 只允许一层——父任务自己已经是子任务时拒绝。
+/// 只允许一层——父任务自己已经是子任务时拒绝。优先级不能高过父任务：
+/// 父任务为"低"时，新子任务也是"低"。
 pub fn create_task(
     conn: &Connection,
     container: Container,
@@ -400,8 +419,8 @@ pub fn create_task(
     let title = require_name(title, "任务文字")?;
 
     // 先把父任务校验完再开事务：校验失败时没有半截事务，读起来也更直接。
-    let parent_project = match parent_task_id {
-        None => None,
+    let (parent_project, parent_priority) = match parent_task_id {
+        None => (None, None),
         Some(parent_id) => {
             let parent = load_task(conn, parent_id)?;
             if parent.parent_task_id.is_some() {
@@ -410,7 +429,7 @@ pub fn create_task(
             if parent.project_id != container.project_id() {
                 return Err("子任务必须与父任务在同一个容器".to_string());
             }
-            Some(parent.project_id)
+            (Some(parent.project_id), Some(parent.priority))
         }
     };
 
@@ -437,6 +456,12 @@ pub fn create_task(
         Some(parent_id) => next_sort_order(&tx, "task", "parent_task_id = ?1", params![parent_id])?,
     };
 
+    // 默认“中”，但父任务更低时跟着父任务，别让子任务一出生就违规。
+    let priority = match parent_priority {
+        Some(parent) if parent.rank() < Priority::Mid.rank() => parent,
+        _ => Priority::Mid,
+    };
+
     tx.execute(
         "INSERT INTO task (project_id, module_id, submodule_id, parent_task_id, \
                            title, status, priority, sort_order) \
@@ -449,7 +474,7 @@ pub fn create_task(
             title,
             // 默认值由领域层写出来，不靠 schema 的 DEFAULT：规则只有一处真相。
             Status::Todo.as_str(),
-            Priority::Mid.as_str(),
+            priority.as_str(),
             sort_order
         ],
     )
@@ -463,7 +488,7 @@ pub fn create_task(
         parent_task_id,
         title: title.to_string(),
         status: Status::Todo,
-        priority: Priority::Mid,
+        priority,
         note: String::new(),
         sort_order,
     };
@@ -497,14 +522,35 @@ pub fn rename_task(conn: &Connection, id: i64, title: &str) -> Res<Task> {
 }
 
 /// 改优先级。不涉及确认：组内重排是这个字段的代价，不需要问。
+///
+/// 子任务不能高过父任务：菜单不会给出非法选项，这里再兜底拒绝。
+/// 父任务降档时，仍高于它的子任务在同一个事务里一并降档。
 pub fn set_priority(conn: &Connection, id: i64, priority: Priority) -> Res<Task> {
     let mut task = load_task(conn, id)?;
 
-    conn.execute(
+    if let Some(parent_id) = task.parent_task_id {
+        let parent = load_task(conn, parent_id)?;
+        if priority.rank() > parent.priority.rank() {
+            return Err("子任务优先级不能高于父任务".to_string());
+        }
+    }
+
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    tx.execute(
         "UPDATE task SET priority = ?1 WHERE id = ?2",
         params![priority.as_str(), id],
     )
     .map_err(db_err)?;
+
+    // 一次降档最多命中两个旧档位，逐条 UPDATE 比在 SQL 里重复一份档位顺序更好读。
+    for old in priority.above() {
+        tx.execute(
+            "UPDATE task SET priority = ?1 WHERE parent_task_id = ?2 AND priority = ?3",
+            params![priority.as_str(), id, old.as_str()],
+        )
+        .map_err(db_err)?;
+    }
+    tx.commit().map_err(db_err)?;
 
     task.priority = priority;
     Ok(task)
@@ -1681,6 +1727,63 @@ mod tests {
         let updated = set_priority(&conn, task.id, Priority::High).unwrap();
         assert_eq!(updated.priority.as_str(), "high");
         assert_eq!(load_task(&conn, task.id).unwrap().priority.as_str(), "high");
+    }
+
+    #[test]
+    fn subtask_priority_cannot_exceed_parent() {
+        let conn = conn();
+        let parent = seed_task(&conn); // 默认 mid
+        let child = create_child(&conn, &parent, "子任务").task; // 默认 mid
+
+        let error = set_priority(&conn, child.id, Priority::High).unwrap_err();
+        assert!(error.contains("不能高于父任务"), "{error}");
+        assert_eq!(load_task(&conn, child.id).unwrap().priority.as_str(), "mid");
+
+        // 同级与降档都允许。
+        set_priority(&conn, child.id, Priority::Mid).unwrap();
+        set_priority(&conn, child.id, Priority::Low).unwrap();
+        assert_eq!(load_task(&conn, child.id).unwrap().priority.as_str(), "low");
+    }
+
+    #[test]
+    fn new_subtask_is_capped_by_low_parent() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+
+        set_priority(&conn, parent.id, Priority::Low).unwrap();
+        let child = create_child(&conn, &parent, "低父的子任务").task;
+        assert_eq!(
+            child.priority.as_str(),
+            "low",
+            "父任务为低时不能再生出中/高子任务"
+        );
+
+        set_priority(&conn, parent.id, Priority::High).unwrap();
+        let another = create_child(&conn, &parent, "高父的子任务").task;
+        assert_eq!(another.priority.as_str(), "mid", "默认档位仍是中");
+    }
+
+    #[test]
+    fn lowering_parent_priority_cascades_to_higher_children() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        set_priority(&conn, parent.id, Priority::High).unwrap();
+
+        let high = create_child(&conn, &parent, "高子").task;
+        set_priority(&conn, high.id, Priority::High).unwrap();
+        let mid = create_child(&conn, &parent, "中子").task;
+        let low = create_child(&conn, &parent, "低子").task;
+        set_priority(&conn, low.id, Priority::Low).unwrap();
+
+        set_priority(&conn, parent.id, Priority::Mid).unwrap();
+        assert_eq!(load_task(&conn, high.id).unwrap().priority.as_str(), "mid");
+        assert_eq!(load_task(&conn, mid.id).unwrap().priority.as_str(), "mid");
+        assert_eq!(load_task(&conn, low.id).unwrap().priority.as_str(), "low");
+
+        set_priority(&conn, parent.id, Priority::Low).unwrap();
+        assert_eq!(load_task(&conn, high.id).unwrap().priority.as_str(), "low");
+        assert_eq!(load_task(&conn, mid.id).unwrap().priority.as_str(), "low");
+        assert_eq!(load_task(&conn, low.id).unwrap().priority.as_str(), "low");
     }
 
     /// 没有子任务就没什么要确认的。
