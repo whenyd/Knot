@@ -42,7 +42,7 @@ reset_database   // 仅 dev build 注册；release 不注册、前端不显示�
 | 父子状态联动 | ✅ 已完成（阶段四 T12–T14） |
 | 状态 / 优先级筛选 | ✅ 已完成（阶段五 T15/T16） |
 | 迁移安全 | ✅ 已完成（阶段六 T17–T19） |
-| 工程化 | 前端纯函数无单测；`npm run tauri build` 从未跑过 |
+| 工程化 | ✅ 前端单测（T20）；release exe 实跑（T21，安装包按归档约定跳过） |
 
 ---
 
@@ -158,9 +158,16 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 
 | # | 任务 | 改动位置 | 验收 | 依赖 |
 | --- | --- | --- | --- | --- |
-| T20 | 前端纯函数单测 | 引入 vitest；覆盖 `grouping.ts` 的 `sortTasks` / `buildGroups` / `selectScope` / `resolveTarget` / `countGroup` | `npm test` 绿；至少有一条失败会红的示例（如 scope = 子模块时 `resolveTarget` 必须同时给出 moduleId） | — |
-| T21 | release 构建实跑 | — | `npm run tauri build` 出安装包并启动一次；确认 `PRAGMA foreign_keys`、库路径在 release 下同样正确 | T17 |
+| ~~T20~~ | ✅ **前端纯函数单测**（已完成） | 引入 vitest 5；`src/grouping.test.ts` 覆盖 `grouping.ts` 的 `sortTasks` / `buildGroups` / `selectScope` / `resolveTarget` / `countGroup`（另含筛选函数） | `npm test` 绿（14 条）；`resolveTarget` 的子模块用例会守住“必须同时给出 moduleId”，故意改坏实现时该用例变红 | — |
+| ~~T21~~ | ✅ **release 构建实跑**（已完成；安装包按归档约定跳过） | `npx tauri build --no-bundle`（无 bundler）；release exe | 启动 release exe 一次：CDP 创建项目/模块/任务后删除模块，`plan.taskCount=1`，库中 `tasks_in_module=0`、`total_tasks=0`、`foreign_key_check=[]`、`user_version=3`；库路径 `%APPDATA%\todolist\tasks.sqlite`。系统无 WiX/NSIS，项目已归档，不再下载 bundler | T17 |
 | T22 | （可选）CI | GitHub Actions：`cargo test` + `tsc` + `vitest` | 每个 PR 自动跑 | T20 |
+
+阶段 7 实现决策：
+
+- 前端单测用 vitest 5：`npm test` 就是 `vitest run`，配置在 `vitest.config.ts`，只收 `src/**/*.test.ts`，跑在 node 环境，不启 Tauri、不碰 DOM。
+- 测试数据用工厂函数直接造 `Task` / `Module`；`resolveTarget` 的子模块用例同时断言 `moduleId` 与 `submoduleId`，作为“实现退化成只给 submoduleId 就会红”的守门用例。
+- 测试文件放在 `src/` 下，因此 `tsc --noEmit` 也会检查它；`vite build` 不会把测试打进产物。
+- T21 只用系统已有能力：本机没有 WiX/NSIS，项目已归档，不再下载 bundler；改用 `npx tauri build --no-bundle` 验证 release exe 与库/FK 行为，安装包部分跳过。
 
 ---
 
@@ -168,7 +175,7 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 
 每个任务收尾都按这套走，别只报“编译通过”：
 
-1. `cargo test`（后端规则）+ `npx tsc --noEmit`（前端类型）+ `vite build`。
+1. `cargo test`（后端规则）+ `npm test`（前端纯函数）+ `npx tsc --noEmit`（前端类型）+ `vite build`。
 2. **涉及界面的改动**：用 `@tauri-apps/api/mocks` 的 `mockIPC` 把 `src/main.ts` 挂到 `index.html` 的结构上，起 `npx vite --port 1420`，再用无头 Edge 截图人工核对。
    - 需要验证调用链时，让 mock 后端**有状态**（`create_task` 真的往数组里追加、`list_tasks` 真的返回它），脚本模拟点击/输入。
    - **收尾时按端口找 PID 再 `taskkill //F //PID`**：`background_command stop` 杀不掉 `npx` 拉起的子进程，会占着 1420 让 `tauri dev` 起不来。

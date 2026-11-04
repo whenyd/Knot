@@ -28,6 +28,7 @@ index.html            窗口骨架：左栏（待办 + 项目 + 范围树）+ �
 src/
   api.ts              唯一的前端 ↔ 后端接口层（invoke 只出现在这里）
   grouping.ts         纯函数数据管线：组内排序、按模块建树分组、范围筛选、分组计数
+  grouping.test.ts    纯函数单测（vitest）
   menu.ts             左栏右键菜单组件（弹出/定位/关闭）
   main.ts             状态 + 事件 + 渲染（原生 DOM，无 UI 框架）
 src-tauri/src/
@@ -44,9 +45,9 @@ src-tauri/src/
 ```bash
 npm install
 npm run tauri dev      # 开发窗口（前端热更新）
-npm test               # 领域层 + 迁移单测（在 src-tauri 下 cargo test）
+npm test               # 前端纯函数单测（vitest）
 npm run build          # 前端类型检查 + 打包
-npm run tauri build    # 出安装包
+npm run tauri build    # 出安装包（需系统已有 WiX/NSIS；否则用 npx tauri build --no-bundle）
 ```
 
 数据库文件：Windows `%APPDATA%/todolist/tasks.sqlite`（macOS/Linux 为对应平台的 app data 目录）。

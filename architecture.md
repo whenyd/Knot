@@ -165,6 +165,7 @@ delete_task(id) -> { notices }
 - **一次渲染只建一棵树**：`buildGroups` 的结果同时给左栏范围树算计数、给表格做分组，`selectScope` 再把范围套上去——同一棵树不会被算两遍、更不会两份不一致。
 - **两处折叠互不影响**：左栏范围树的收起（`collapsedNodes`）只管树的显示，表格分组行的收起（`collapsedGroups`）只管表格的行。一个是导航，一个是阅读密度。
 - **数据管线**（单一方向，不双向绑定）：`list_tasks` → `buildGroups` → `selectScope` → 渲染时按两个筛选集判断任务是否出现；分组与计数始终使用未筛选的树，组内任务按 `priority` 再 `sort_order` 排序。
+- **纯函数单测**：`src/grouping.test.ts` 用 vitest 覆盖 `sortTasks` / `buildGroups` / `selectScope` / `resolveTarget` / `countGroup` 与筛选函数，`npm test` 直接跑，不启 Tauri、不碰 DOM。
 - **筛选语义**：状态与优先级是“且”关系，集合内是“或”关系，允许某一组全不选。父任务不命中但子任务命中时，父任务以 `.is-context` 灰显保留为上下文，子任务正常显示；二者都不命中才隐藏整个父任务树。筛选空态不删除用户创建的分组，也不改变任何计数。
 - **交互归属**：状态格点击只调 `plan_set_status`；`needs_confirm` 为真就弹窗；`apply_set_status` 回来后重取。就地编辑（双击）走 `rename_task`，空值前端还原、后端也拒绝。
 - **弹窗有两种形态，共用一个 modal**：`askConfirm`（告知影响后确认）与 `askText`（改名/新建时输入一个名字）。**同一时刻只能有一个弹窗**——新弹窗会把上一个按“取消”收场，否则两个 `await` 会同时悬着、抢同一批 DOM 监听，一次回车跑两个命令（已发生过）。输入框里空白名不关窗也不出库。

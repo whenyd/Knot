@@ -18,13 +18,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 npm install
 npm run tauri dev                          # 开发窗口；Vite 固定占用 1420（strictPort）
 npm run build                              # tsc + vite build（前端类型检查 + 打包）
+npm test                                   # 前端纯函数单测（vitest）
 npx tsc --noEmit                           # 只做类型检查
 cargo test --manifest-path src-tauri/Cargo.toml             # 全部后端单测
 cargo test --manifest-path src-tauri/Cargo.toml <测试名>     # 单个测试，如 v2_upgrades_existing_data_and_cascades
-npm run tauri build                        # release 安装包（ROADMAP 里尚未实跑过）
+npm run tauri build                        # release 安装包（NSIS / MSI；需系统已有 WiX/NSIS）
 ```
 
-前端目前没有测试框架，也没有 `npm test` 脚本——不要照 README 的 `npm test` 去跑；后端测试内嵌在 `domain.rs` / `migrations.rs` / `db.rs` / `lib.rs` 的 `#[cfg(test)]` 里，用内存库或临时目录。
+前端测试用 vitest，测试文件是 `src/grouping.test.ts`，覆盖 `grouping.ts` 的排序、分组、范围、计数与筛选纯函数。后端测试仍内嵌在 `domain.rs` / `migrations.rs` / `db.rs` / `lib.rs` 的 `#[cfg(test)]` 里，用内存库或临时目录。
 
 数据库：Windows `%APPDATA%/todolist/tasks.sqlite`。删掉该文件即重置；dev 版左栏底部另有「重置数据库（开发）」入口（只清活库与边车，保留 `.bak-*` 备份），正式版不注册这条命令。
 
