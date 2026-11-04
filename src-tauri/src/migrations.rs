@@ -112,12 +112,21 @@ WHERE parent_task_id IS NOT NULL
   );
 "#;
 
+/// 库当前已应用到第几条迁移。`0` 表示全新库。
+pub fn current_version(conn: &Connection) -> Result<i64, String> {
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| format!("无法读取 user_version：{e}"))
+}
+
+/// 本程序支持的迁移总数。
+pub fn target_version() -> i64 {
+    MIGRATIONS.len() as i64
+}
+
 /// 把库推到最新版本。已经是最新就什么都不做。
 pub fn migrate(conn: &mut Connection) -> Result<(), String> {
-    let current: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|e| format!("无法读取 user_version：{e}"))?;
-    let target = MIGRATIONS.len() as i64;
+    let current = current_version(conn)?;
+    let target = target_version();
 
     if current > target {
         // 库比程序新：多半是降级运行。继续写会破坏未知版本的结构。
@@ -138,9 +147,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), String> {
     // 无论成功失败都先把外键恢复，别把连接留在半配置状态。
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(|e| format!("无法恢复外键约束：{e}"))?;
-    applied?;
-
-    check_foreign_keys(conn)
+    applied
 }
 
 /// 整段包在单个事务里：迁移要么全到，要么一点不动。
@@ -150,11 +157,21 @@ fn apply_all(conn: &mut Connection, from: usize) -> Result<(), String> {
         .map_err(|e| format!("无法开启迁移事务：{e}"))?;
 
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(from) {
-        tx.execute_batch(sql)
-            .map_err(|e| format!("迁移到版本 {} 失败：{e}", i + 1))?;
+        tx.execute_batch(sql).map_err(|e| {
+            // SQLite 的报错会把整段失败的 SQL 也带上；给用户只留第一行。
+            let message = e.to_string();
+            let first = message.lines().next().unwrap_or(&message);
+            // 「table X already exists in」后面的 SQL 已被截掉，收尾的 " in" 也去掉。
+            let first = first.strip_suffix(" in").unwrap_or(first);
+            format!("迁移到版本 {} 失败：{first}", i + 1)
+        })?;
         tx.pragma_update(None, "user_version", (i + 1) as i64)
             .map_err(|e| format!("迁移到版本 {} 后写 user_version 失败：{e}", i + 1))?;
     }
+
+    // 校验必须在提交之前：失败时连 user_version 一起回滚，下次启动还会重新
+    // 失败并拒绝启动；提交后再校验的话，下一次启动会以为迁移已完成而放行。
+    check_foreign_keys(&tx)?;
 
     tx.commit().map_err(|e| format!("提交迁移事务失败：{e}"))
 }
@@ -178,7 +195,7 @@ fn check_foreign_keys(conn: &Connection) -> Result<(), String> {
     }
 
     if violations > 0 {
-        return Err(format!("迁移后外键校验失败：{violations} 条悬空引用"));
+        return Err(format!("迁移校验失败（已回滚）：{violations} 条悬空引用"));
     }
     Ok(())
 }
@@ -328,5 +345,34 @@ mod tests {
                 (6, "mid".to_string()),
             ]
         );
+    }
+
+    /// 外键校验在事务内：有悬空引用时整段回滚，user_version 不变、新表不留下。
+    #[test]
+    fn foreign_key_check_failure_rolls_back() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // bundled SQLite 默认开着外键；构造历史脏数据前先关掉。
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+        conn.execute_batch("INSERT INTO task (id, module_id, title) VALUES (1, 999, '悬空模块');")
+            .unwrap();
+
+        let err = migrate(&mut conn).unwrap_err();
+        assert!(err.contains("悬空引用"), "{err}");
+        assert_eq!(
+            current_version(&conn).unwrap(),
+            1,
+            "失败必须回滚 user_version"
+        );
+
+        let v2_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_v2')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!v2_exists, "失败的事务不应留下 task_v2");
     }
 }

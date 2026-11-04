@@ -31,6 +31,11 @@
              新建与重命名的入口都在右键菜单里，这里不再摆按钮。 -->
         <div class="side-heading" id="scope-heading">范围</div>
         <nav class="side-group" id="scope-section"></nav>
+
+        <!-- 仅开发版显示；正式构建里 import.meta.env.DEV 为 false，永远保持隐藏。 -->
+        <button class="side-add dev-reset" id="dev-reset" type="button" hidden>
+          重置数据库（开发）
+        </button>
       </aside>
 
       <main class="main">

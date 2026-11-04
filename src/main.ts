@@ -33,6 +33,9 @@ import {
   type TaskFilters,
 } from "./grouping";
 
+/** 数据库起不来时，后端通过这个 query 参数把原因交给前端。 */
+const STARTUP_ERROR_PARAM = "startupError";
+
 // 状态是三态**循环**：一个字段一个控件，点一下换下一个值。
 const NEXT_STATUS: Record<Status, Status> = { todo: "doing", doing: "done", done: "todo" };
 const STATUS_LABELS: Record<Status, string> = { todo: "未完成", doing: "进行中", done: "已完成" };
@@ -132,7 +135,14 @@ const dom = {
   modalTextarea: must<HTMLTextAreaElement>("modal-textarea"),
   modalOk: must<HTMLButtonElement>("modal-ok"),
   modalCancel: must<HTMLButtonElement>("modal-cancel"),
+  devReset: must<HTMLButtonElement>("dev-reset"),
 };
+
+// 删库重建只在开发版出现；正式构建里整段分支会被裁掉，按钮保持 hidden。
+if (import.meta.env.DEV) {
+  dom.devReset.hidden = false;
+  dom.devReset.addEventListener("click", () => void resetDatabaseFlow());
+}
 
 // ---------------------------------------------------------------------------
 // 加载
@@ -1621,6 +1631,33 @@ async function deleteProjectFlow(project: Project): Promise<void> {
   }
 }
 
+/** 仅开发版：删除活库并重建。正式版没有按钮，后端也不注册命令。 */
+async function resetDatabaseFlow(): Promise<void> {
+  const confirmed = await askConfirm({
+    title: "重置数据库？",
+    body: "当前数据库文件与全部数据会被删除，随后建一个空库。此操作仅开发版本可用，无法撤销。",
+    confirmText: "删除并重建",
+  });
+  if (!confirmed) return;
+
+  try {
+    await api.resetDatabase();
+    // 库已经换了一份：视图回到「待办」，旧的分组/折叠键全部失效。
+    state.container = { kind: "todo" };
+    state.scope = { kind: "project" };
+    state.collapsedNodes.clear();
+    state.collapsedGroups.clear();
+    state.collapsedTasks.clear();
+    state.addingSubtaskFor = null;
+    subtaskDraft = "";
+    closeMenu();
+    await reload();
+    showNotice("数据库已重置");
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
+
 async function createTask(): Promise<void> {
   const title = dom.taskInput.value.trim();
   if (!title) return;
@@ -1702,7 +1739,40 @@ if (document.readyState === "loading") {
   boot();
 }
 
+/**
+ * 数据库起不来时的独立页面：只显示后端给的原因与备份路径，不碰任何命令。
+ * 后端在 setup 里把主窗口换成 `index.html?startupError=...`，这里直接接管。
+ */
+function renderStartupError(message: string): void {
+  document.title = "无法启动 — 待办";
+  document.body.classList.add("startup-error-body");
+
+  const panel = el("main", "startup-error");
+  const card = el("section", "startup-error-card");
+  card.append(
+    el("h1", "startup-error-title", "无法启动"),
+    el(
+      "p",
+      "startup-error-lead",
+      "数据库迁移没有完成。程序没有继续加载，数据库文件没有被部分改写。",
+    ),
+    el("pre", "startup-error-detail", message),
+    el(
+      "p",
+      "startup-error-hint",
+      "按照上面的原因处理后再打开应用。需要恢复时，用上面列出的备份文件覆盖 tasks.sqlite。",
+    ),
+  );
+  panel.append(card);
+  document.body.replaceChildren(panel);
+}
+
 function boot(): void {
+  const startupError = new URLSearchParams(location.search).get(STARTUP_ERROR_PARAM);
+  if (startupError) {
+    renderStartupError(startupError);
+    return;
+  }
   render();
   void reload();
 }

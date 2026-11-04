@@ -142,3 +142,11 @@ pub fn plan_delete_project(db: State<'_, Db>, id: i64) -> Result<DeletePlan, Str
 pub fn delete_project(db: State<'_, Db>, id: i64) -> Result<(), String> {
     domain::delete_project(&db.conn(), id)
 }
+
+/// 仅开发版：删除活库并重建。正式版不注册这条命令。
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn reset_database(app: tauri::AppHandle, db: State<'_, Db>) -> Result<(), String> {
+    let path = crate::db::db_path(&app)?;
+    db.reset(&path)
+}

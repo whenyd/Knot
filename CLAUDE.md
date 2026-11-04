@@ -24,9 +24,9 @@ cargo test --manifest-path src-tauri/Cargo.toml <测试名>     # 单个测试�
 npm run tauri build                        # release 安装包（ROADMAP 里尚未实跑过）
 ```
 
-前端目前没有测试框架，也没有 `npm test` 脚本——不要照 README 的 `npm test` 去跑；后端测试内嵌在 `domain.rs` 与 `migrations.rs` 的 `#[cfg(test)]` 里，用内存库。
+前端目前没有测试框架，也没有 `npm test` 脚本——不要照 README 的 `npm test` 去跑；后端测试内嵌在 `domain.rs` / `migrations.rs` / `db.rs` / `lib.rs` 的 `#[cfg(test)]` 里，用内存库或临时目录。
 
-数据库：Windows `%APPDATA%/todolist/tasks.sqlite`。删掉该文件即重置；没有其他清库入口（dev 删库重建尚未实现）。
+数据库：Windows `%APPDATA%/todolist/tasks.sqlite`。删掉该文件即重置；dev 版左栏底部另有「重置数据库（开发）」入口（只清活库与边车，保留 `.bak-*` 备份），正式版不注册这条命令。
 
 ## 分层与硬性规矩
 
@@ -46,8 +46,8 @@ npm run tauri build                        # release 安装包（ROADMAP 里尚�
 - 分类是 `project → module → submodule`；子任务只有一层（`parent_task_id`），且子任务不存 `module_id`/`submodule_id`——归属真相在父任务，后端拒绝“子任务挂子任务”。
 - 删除一律“删父带走子”：项目/模块/子模块/父任务的外键都是 `CASCADE`。删除模块时组内任务是真删，不是退回未分类（D1 已定）。
 - 迁移用 `PRAGMA user_version`，`MIGRATIONS: &[&str]` 顺序执行。**已发布的条目一个字都不要改**（v1 把分类外键写成 `SET NULL` 的历史无法修改，v2 靠“建新表→拷贝→删旧表→改名”改成 `CASCADE`）。只写前进，不写 down。
-- 迁移整段包在单个事务里；事务前关 `foreign_keys`（事务内是 no-op），提交后跑 `PRAGMA foreign_key_check`。每个连接打开时显式 `PRAGMA foreign_keys = ON`。
-- 迁移前自动备份、失败时显示备份路径、dev 删库重建：**规格里有，代码还没有**（ROADMAP 阶段 6），当前 `lib.rs` 迁移失败会 panic。
+- 迁移整段包在单个事务里；事务前关 `foreign_keys`（事务内是 no-op），`PRAGMA foreign_key_check` 在**提交之前**跑，失败连 `user_version` 一起回滚。每个连接打开时显式 `PRAGMA foreign_keys = ON`。
+- 迁移前自动备份：仅旧库升级（`0 < user_version < 最新版本`）时生成 `tasks.sqlite.bak-v<旧版本>-<epoch 毫秒>`，保留最近 5 份（只清理 `bak-v*`）；备份失败即停止迁移。迁移失败由 `lib.rs` 开一个 `?startupError=` 错误窗口显示原因与备份路径，不再 panic。`reset_database` 只在 debug 注册、按钮只在 `import.meta.env.DEV` 显示，正式版没有这条路径。
 
 ## 前端结构
 

@@ -131,4 +131,6 @@ export const api = {
   /** 删除项目的第一步：项目里的全部任务都会一起删除。 */
   planDeleteProject: (id: number) => invoke<DeletePlan>("plan_delete_project", { id }),
   deleteProject: (id: number) => invoke<void>("delete_project", { id }),
+  /** 仅开发版注册：删除活库并重建一个空库。正式版调用会失败。 */
+  resetDatabase: () => invoke<void>("reset_database"),
 };

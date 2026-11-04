@@ -1031,3 +1031,74 @@ button.group-caret.is-collapsed::before {
 .modal-textarea[hidden] {
   display: none;
 }
+
+/* ---------------------------------------------------------------- 启动失败页 */
+
+.startup-error-body {
+  overflow: auto;
+  background: var(--bg-soft);
+}
+
+.startup-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 32px;
+}
+
+.startup-error-card {
+  width: min(720px, 100%);
+  padding: 28px 32px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: 0 12px 40px rgb(15 23 42 / 10%);
+}
+
+.startup-error-title {
+  margin: 0 0 8px;
+  color: var(--danger);
+  font-size: 20px;
+}
+
+.startup-error-lead {
+  margin: 0 0 16px;
+  color: var(--muted);
+}
+
+.startup-error-detail {
+  max-height: 45vh;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  color: var(--fg);
+  font:
+    13px/1.6 "Cascadia Mono",
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.startup-error-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ---------------------------------------------------------------- 开发版 */
+
+.dev-reset {
+  margin-top: auto;
+  color: var(--danger);
+  border-color: #f2c4c4;
+}
+
+.dev-reset:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}

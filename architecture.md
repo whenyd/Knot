@@ -84,9 +84,10 @@ CREATE INDEX idx_task_parent  ON task(parent_task_id);
 - **版本号**：`PRAGMA user_version`，`MIGRATIONS: &[&str]` 从第 1 条起顺序执行；`user_version` 即"已应用到第几条"。
 - **时机**：打开连接后、任何读写之前，整段包在**单个事务**里。失败则回滚、拒绝启动，并在界面上给出备份文件路径。
 - **只写前进**：不写 down 迁移。down 长期没人执行，是假的安全感；回滚靠下面的备份。
-- **迁移前自动备份**：库文件复制为 `tasks.sqlite.bak-v<旧版本>-<时间戳>`，只保留最近 5 份（更早的删除）。
-- **外键开关**：每个连接显式 `PRAGMA foreign_keys = ON`（SQLite 默认关闭）。迁移事务内先关（重建表时外键会挡路），提交后跑一次 `PRAGMA foreign_key_check`，通过再打开。
-- **开发期重置**：仅 dev build 提供"删库重建"入口，正式版不暴露。
+- **迁移前自动备份**：仅当 `0 < user_version < MIGRATIONS.len()`（已有数据的旧库升级）时，把库文件复制为同目录的 `tasks.sqlite.bak-v<旧版本>-<epoch 毫秒>`；新库和同版本启动不备份。备份失败即停止迁移，绝不无备份地改结构。每次备份后只保留最新 5 份，清理只认 `tasks.sqlite.bak-v*` 前缀（用户手工放的 `.bak-import-*` 不碰）。迁移失败时错误信息把**备份路径放在最前面**，再附一句原因。
+- **外键开关**：每个连接显式 `PRAGMA foreign_keys = ON`（bundled SQLite 默认也开，但代码不依赖编译选项）。迁移事务内先关（重建表时外键会挡路），`PRAGMA foreign_key_check` 在**提交之前**执行——校验失败连 `user_version` 一起回滚，下次启动还会重新失败并拒绝启动，而不是误以为迁移已完成。
+- **启动失败界面**：setup 失败不再 panic，而是隐藏主窗口、新建标题为「无法启动 — 待办」的错误窗口，加载 `index.html?startupError=<percent-encoded 原因>`。前端 `boot()` 在渲染任何界面、调用任何命令之前读取该参数，用独立页面原样显示原因与备份路径（`textContent`，不拼 HTML）。
+- **开发期重置**：仅 dev build 的 invoke 注册里包含 `reset_database`（`#[cfg(debug_assertions)]`），前端也只在 `import.meta.env.DEV` 时显示左栏底部的「重置数据库（开发）」按钮。重置整段持锁：用内存连接换出文件连接并释放句柄 → 删 `tasks.sqlite` 与 `-journal`/`-wal`/`-shm` 边车 → 重新打开、跑迁移并放回。**保留 `.bak-*` 备份**；删除主文件失败时把原库接回去并返回错误，应用继续可用。正式版不注册这条命令。
 
 ## 状态联动（父子）
 
@@ -173,6 +174,8 @@ delete_task(id) -> { notices }
 - **子任务渲染**：`buildGroups` 继续跳过 `parentTaskId !== null` 的任务（它们不占分组行，分组计数只算父任务）；渲染时另建 `parentTaskId → tasks` 的索引，父任务行后按同一套排序（优先级 → `sort_order`）渲染缩进子行。父任务行默认展开，`collapsedTasks` 只记本次会话里收起的那几个；父任务标题前的折叠箭头与行内「＋」只出现在顶层任务上。
 - **行内子任务输入**：`addingSubtaskFor` 同时只有一个父任务，输入草稿放在 `subtaskDraft`（状态对象外，重绘不丢）。回车保存并保持输入行打开（可连续添加），Esc 取消，失焦保存非空内容；失焦回调延后一拍并检查 `input.isConnected`，避免重绘换掉输入框时被误当成提交。
 - **轻提示队列**：表格底部一条队列，FIFO 一次显示一条（info 3s / error 8s），几秒后自动消失，不阻塞任何操作。一次操作带回多条提示时不会互相顶掉。
+- **启动失败页**：`boot()` 的第一件事是读 `?startupError=`；有值就用 `document.body.replaceChildren` 换成独立错误页，原因与备份路径原样放进 `<pre>`，直接 return，连 `render()` / `reload()` 都不走。
+- **开发版重置**：按钮在左栏底部，默认 `hidden`，只有 `import.meta.env.DEV` 为真时取消隐藏并绑定点击；`vite build` 会把整段分支裁掉，正式版的后端也没有这条命令。确认框走 `askConfirm`，成功后把视图状态复位到「待办 / 全部」并全量重取，无需重启进程。
 
 ## 边界情况
 
@@ -180,4 +183,5 @@ delete_task(id) -> { notices }
 - 「待办」视图：没有模块树、没有分组行，表格直接平铺（与目标文档一致）。
 - 「未分类」：项目内 `module_id IS NULL` 的任务聚成一个固定分组行，排在模块分组之后。
 - 编辑任务文字为空白：还原原文，不写库。
-- 迁移失败：拒绝启动并显示备份路径，绝不带着半迁移的库继续跑。
+- 迁移失败：事务回滚，库保持在旧版本；主窗口换成错误窗口，显示原因与迁移前备份的路径，绝不带着半迁移的库继续跑。修好原因后下次启动会重新尝试迁移。
+- 启动失败页只渲染、不调用任何命令；错误窗口不托管数据库连接。
