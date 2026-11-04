@@ -159,10 +159,11 @@ delete_task(id) -> { notices }
 
 ## 前端结构
 
-- **视图状态**：`container`（待办 / 某个项目）、`scope`（全部 / 某模块 / 某子模块 / 未分类）、`statusFilter: Set`、`priorityFilter: Set`、`collapsedNodes: Set<nodeId>`（左栏范围树收起的模块）。
+- **视图状态**：`container`（待办 / 某个项目）、`scope`（全部 / 某模块 / 某子模块 / 未分类）、`statusFilter: Set<Status>`、`priorityFilter: Set<Priority>`、`collapsedNodes: Set<nodeId>`（左栏范围树收起的模块）。筛选在本次会话内跨范围、跨项目保留。
 - **一次渲染只建一棵树**：`buildGroups` 的结果同时给左栏范围树算计数、给表格做分组，`selectScope` 再把范围套上去——同一棵树不会被算两遍、更不会两份不一致。
 - **两处折叠互不影响**：左栏范围树的收起（`collapsedNodes`）只管树的显示，表格分组行的收起（`collapsedGroups`）只管表格的行。一个是导航，一个是阅读密度。
-- **数据管线**（单一方向，不双向绑定）：`list_tasks` → 按 scope 过滤 → 按两个筛选集过滤 → 按 module/submodule 建树 → 分组按 `sort_order`、组内任务按 `priority` 再 `sort_order` 排序 → 渲染。
+- **数据管线**（单一方向，不双向绑定）：`list_tasks` → `buildGroups` → `selectScope` → 渲染时按两个筛选集判断任务是否出现；分组与计数始终使用未筛选的树，组内任务按 `priority` 再 `sort_order` 排序。
+- **筛选语义**：状态与优先级是“且”关系，集合内是“或”关系，允许某一组全不选。父任务不命中但子任务命中时，父任务以 `.is-context` 灰显保留为上下文，子任务正常显示；二者都不命中才隐藏整个父任务树。筛选空态不删除用户创建的分组，也不改变任何计数。
 - **交互归属**：状态格点击只调 `plan_set_status`；`needs_confirm` 为真就弹窗；`apply_set_status` 回来后重取。就地编辑（双击）走 `rename_task`，空值前端还原、后端也拒绝。
 - **弹窗有两种形态，共用一个 modal**：`askConfirm`（告知影响后确认）与 `askText`（改名/新建时输入一个名字）。**同一时刻只能有一个弹窗**——新弹窗会把上一个按“取消”收场，否则两个 `await` 会同时悬着、抢同一批 DOM 监听，一次回车跑两个命令（已发生过）。输入框里空白名不关窗也不出库。
 - **内联新建项目表单**是弹窗以外唯一的输入形态（左栏「＋ 新建项目」）。它只有一个收场出口 `resetProjectForm()`（隐藏 + 清空）：提交成功、点表单外（`document` 上的 `mousedown`，表单内不关）、Esc 都走它；打开时挂监听、关闭时摘掉，不留常驻监听。已输入的文字跟随表单一起丢弃——不保留草稿，也不计入状态。

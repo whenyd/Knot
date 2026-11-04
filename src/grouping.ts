@@ -4,7 +4,22 @@
  * 之所以放在前端而不是 SQL：任务量在本机是小规模，前端算足够快，
  * 也免得为"分组 × 筛选 × 排序"的每种组合写一条查询。
  */
-import type { Module, Priority, ScopeTarget, Task } from "./api";
+import type { Module, Priority, ScopeTarget, Status, Task } from "./api";
+
+/** 状态与优先级是“且”关系；集合内是“或”关系。 */
+export interface TaskFilters {
+  statuses: ReadonlySet<Status>;
+  priorities: ReadonlySet<Priority>;
+}
+
+export function taskMatchesFilters(task: Task, filters: TaskFilters): boolean {
+  return filters.statuses.has(task.status) && filters.priorities.has(task.priority);
+}
+
+/** 筛选只决定渲染哪些任务，不改动分组树和计数所用的原始任务。 */
+export function filterTasks(tasks: readonly Task[], filters: TaskFilters): Task[] {
+  return tasks.filter((task) => taskMatchesFilters(task, filters));
+}
 
 /** 组内排序：优先级 高 → 中 → 低，同优先级按添加顺序（新的在下）。 */
 const PRIORITY_RANK: Record<Priority, number> = { high: 0, mid: 1, low: 2 };

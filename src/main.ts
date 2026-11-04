@@ -22,17 +22,21 @@ import {
   buildGroups,
   countGroup,
   countGroups,
+  filterTasks,
   resolveTarget,
   scopeLabel,
   selectScope,
   sortTasks,
+  taskMatchesFilters,
   type Group,
   type Scope,
+  type TaskFilters,
 } from "./grouping";
 
 // 状态是三态**循环**：一个字段一个控件，点一下换下一个值。
 const NEXT_STATUS: Record<Status, Status> = { todo: "doing", doing: "done", done: "todo" };
 const STATUS_LABELS: Record<Status, string> = { todo: "未完成", doing: "进行中", done: "已完成" };
+const STATUS_ORDER: Status[] = ["todo", "doing", "done"];
 
 // 优先级是浮窗选择：三档都摆出来，不用循环着找。
 const PRIORITY_ORDER: Priority[] = ["high", "mid", "low"];
@@ -57,6 +61,9 @@ interface State {
   addingSubtaskFor: number | null;
   /** 表格里收起了子任务的父任务 id。默认展开，所以存的是收起的那几个。 */
   collapsedTasks: Set<number>;
+  /** 顶部筛选在本次会话内保留，切换范围或项目时不重置。 */
+  statusFilter: Set<Status>;
+  priorityFilter: Set<Priority>;
 }
 
 const state: State = {
@@ -69,6 +76,8 @@ const state: State = {
   collapsedGroups: new Set(),
   addingSubtaskFor: null,
   collapsedTasks: new Set(),
+  statusFilter: new Set(["todo", "doing"]),
+  priorityFilter: new Set(PRIORITY_ORDER),
 };
 
 /** 内联子任务输入框的草稿：放在状态对象外，无关重绘也不丢正在打的字。 */
@@ -107,6 +116,7 @@ const dom = {
   scopeSection: must<HTMLElement>("scope-section"),
   viewTitle: must<HTMLElement>("view-title"),
   viewCount: must<HTMLElement>("view-count"),
+  filters: must<HTMLElement>("filters"),
   body: must<HTMLTableSectionElement>("grid-body"),
   empty: must<HTMLParagraphElement>("empty"),
   taskForm: must<HTMLFormElement>("task-form"),
@@ -405,6 +415,8 @@ function renderToolbar(groups: Group[]): void {
   const visible = inProject ? selectScope(groups, state.scope) : groups;
   const { done, total } = countGroups(visible);
 
+  renderFilters();
+
   const base = currentProject()?.name ?? "待办";
   dom.viewTitle.textContent =
     inProject && state.scope.kind !== "project" ? `${base} › ${scopeLabel(groups, state.scope)}` : base;
@@ -415,6 +427,86 @@ function renderToolbar(groups: Group[]): void {
     inProject && state.scope.kind !== "project"
       ? `添加到「${scopeLabel(groups, state.scope)}」，回车保存（优先级中）`
       : "添加任务，回车保存（默认“未分类 / 中”）";
+}
+
+function currentFilters(): TaskFilters {
+  return { statuses: state.statusFilter, priorities: state.priorityFilter };
+}
+
+type FilterKind = "status" | "priority";
+
+function renderFilters(): void {
+  dom.filters.replaceChildren();
+  dom.filters.append(
+    renderFilterGroup(
+      "status",
+      "状态",
+      STATUS_ORDER.map((status) => ({
+        value: status,
+        label: STATUS_LABELS[status],
+        active: state.statusFilter.has(status),
+      })),
+    ),
+    renderFilterGroup(
+      "priority",
+      "优先级",
+      PRIORITY_ORDER.map((priority) => ({
+        value: priority,
+        label: PRIORITY_LABELS[priority],
+        active: state.priorityFilter.has(priority),
+        priority,
+      })),
+    ),
+  );
+}
+
+interface FilterOption {
+  value: string;
+  label: string;
+  active: boolean;
+  priority?: Priority;
+}
+
+function renderFilterGroup(kind: FilterKind, label: string, options: FilterOption[]): HTMLElement {
+  const group = el("div", "filter-group");
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", `${label}筛选`);
+  group.append(el("span", "filter-label", label));
+
+  for (const option of options) {
+    const button = el("button", "filter-chip", option.label);
+    button.type = "button";
+    button.dataset.filterKind = kind;
+    button.dataset.filterValue = option.value;
+    if (option.priority) button.dataset.priority = option.priority;
+    button.setAttribute("aria-pressed", String(option.active));
+    button.addEventListener("click", () => {
+      toggleFilter(kind, option.value);
+    });
+    group.append(button);
+  }
+
+  return group;
+}
+
+function toggleFilter(kind: FilterKind, value: string): void {
+  if (kind === "status") {
+    const status = value as Status;
+    if (state.statusFilter.has(status)) state.statusFilter.delete(status);
+    else state.statusFilter.add(status);
+  } else {
+    const priority = value as Priority;
+    if (state.priorityFilter.has(priority)) state.priorityFilter.delete(priority);
+    else state.priorityFilter.add(priority);
+  }
+
+  render();
+  // 全量重画会替换按钮；焦点送回刚切换的标签，键盘连续操作不中断。
+  dom.filters
+    .querySelector<HTMLButtonElement>(
+      `button[data-filter-kind="${kind}"][data-filter-value="${value}"]`,
+    )
+    ?.focus();
 }
 
 /** 子任务按父任务归桶；桶内与组内父任务同一套排序（优先级 → 添加顺序）。 */
@@ -432,31 +524,67 @@ function groupChildren(tasks: readonly Task[]): Map<number, Task[]> {
 
 function renderTable(groups: Group[]): void {
   const childrenByParent = groupChildren(state.tasks);
+  const filters = currentFilters();
   dom.body.replaceChildren();
 
   // 「待办」没有模块，也就没有分组行：表格直接平铺。
   if (state.container.kind === "todo") {
     const parents = sortTasks(state.tasks.filter((task) => task.parentTaskId === null));
     for (const task of parents) {
-      renderTaskTree(task, childrenByParent.get(task.id) ?? [], dom.body);
+      renderTaskTree(task, childrenByParent.get(task.id) ?? [], dom.body, filters);
     }
-    setEmptyState(parents.length === 0, "「待办」里还没有任务");
+    const hasMatch = parents.some((task) =>
+      taskTreeMatchesFilters(task, childrenByParent.get(task.id) ?? [], filters),
+    );
+    setEmptyState(
+      !hasMatch,
+      parents.length === 0
+        ? "「待办」里还没有任务。在下面输入一行，回车保存。"
+        : "当前筛选下没有任务。调整上方的状态或优先级标签试试。",
+    );
     focusSubtaskInput();
     return;
   }
 
   const visible = selectScope(groups, state.scope);
-  for (const group of visible) renderGroup(group, dom.body, childrenByParent);
+  for (const group of visible) renderGroup(group, dom.body, childrenByParent, filters);
 
   const { total } = countGroups(visible);
   const where = state.scope.kind === "project" ? "这个项目" : `「${scopeLabel(groups, state.scope)}」`;
-  setEmptyState(total === 0, `${where}还没有任务`);
+  const hasMatch = visible.some((group) => groupHasMatchingTaskTree(group, childrenByParent, filters));
+  setEmptyState(
+    !hasMatch,
+    total === 0
+      ? `${where}还没有任务。在下面输入一行，回车保存。`
+      : "当前筛选下没有任务。调整上方的状态或优先级标签试试。",
+  );
   focusSubtaskInput();
 }
 
 function setEmptyState(empty: boolean, message: string): void {
   dom.empty.hidden = !empty;
-  dom.empty.textContent = empty ? `${message}。在下面输入一行，回车保存。` : "";
+  dom.empty.textContent = empty ? message : "";
+}
+
+function taskTreeMatchesFilters(
+  task: Task,
+  children: readonly Task[],
+  filters: TaskFilters,
+): boolean {
+  return taskMatchesFilters(task, filters) || children.some((child) => taskMatchesFilters(child, filters));
+}
+
+function groupHasMatchingTaskTree(
+  group: Group,
+  childrenByParent: Map<number, Task[]>,
+  filters: TaskFilters,
+): boolean {
+  return (
+    group.tasks.some((task) =>
+      taskTreeMatchesFilters(task, childrenByParent.get(task.id) ?? [], filters),
+    ) ||
+    group.children.some((child) => groupHasMatchingTaskTree(child, childrenByParent, filters))
+  );
 }
 
 function groupKey(group: Group): string {
@@ -468,6 +596,7 @@ function renderGroup(
   group: Group,
   host: HTMLElement,
   childrenByParent: Map<number, Task[]>,
+  filters: TaskFilters,
 ): void {
   const key = groupKey(group);
   const collapsed = state.collapsedGroups.has(key);
@@ -503,22 +632,42 @@ function renderGroup(
   if (collapsed) return;
 
   for (const task of group.tasks) {
-    renderTaskTree(task, childrenByParent.get(task.id) ?? [], host);
+    renderTaskTree(task, childrenByParent.get(task.id) ?? [], host, filters);
   }
-  for (const child of group.children) renderGroup(child, host, childrenByParent);
+  for (const child of group.children) renderGroup(child, host, childrenByParent, filters);
 }
 
 interface TaskRowOptions {
   isChild: boolean;
   childCount: number;
+  isContext?: boolean;
 }
 
-/** 父任务 + 默认展开的子任务 + 内联新增行。 */
-function renderTaskTree(task: Task, children: readonly Task[], host: HTMLElement): void {
-  host.append(renderTaskRow(task, { isChild: false, childCount: children.length }));
+/**
+ * 父任务 + 默认展开的子任务 + 内联新增行。
+ *
+ * 父任务不命中但子任务命中时，父行作为灰显上下文保留；两者都不命中才整棵隐藏。
+ */
+function renderTaskTree(
+  task: Task,
+  children: readonly Task[],
+  host: HTMLElement,
+  filters: TaskFilters,
+): void {
+  const matchingChildren = filterTasks(children, filters);
+  const parentMatches = taskMatchesFilters(task, filters);
+  if (!parentMatches && matchingChildren.length === 0) return;
+
+  host.append(
+    renderTaskRow(task, {
+      isChild: false,
+      childCount: matchingChildren.length,
+      isContext: !parentMatches,
+    }),
+  );
 
   if (!state.collapsedTasks.has(task.id)) {
-    for (const child of children) {
+    for (const child of matchingChildren) {
       host.append(renderTaskRow(child, { isChild: true, childCount: 0 }));
     }
   }
@@ -530,6 +679,10 @@ function renderTaskRow(task: Task, options: TaskRowOptions): HTMLTableRowElement
   const row = el("tr", "row-task");
   row.dataset.taskId = String(task.id);
   if (options.isChild) row.classList.add("row-subtask");
+  if (options.isContext) {
+    row.classList.add("is-context");
+    row.title = "筛选上下文：这个父任务本身不匹配当前筛选";
+  }
   if (task.status === "done") row.classList.add("is-done");
 
   row.append(

@@ -52,7 +52,7 @@ npm run tauri build                        # release 安装包（ROADMAP 里尚�
 ## 前端结构
 
 - `main.ts` 持有唯一一份可变 `state`（`container` / `scope` / `collapsedNodes` 等），所有渲染都是“全量状态 → 重建 DOM”，没有框架、没有双向绑定。
-- `grouping.ts` 是纯函数数据管线：`sortTasks` → `buildGroups` → `selectScope` → `countGroup`；同一棵树同时供左栏范围树计数和表格分组，不建第二份。**分组计数只算父任务**（子任务跟随父任务渲染，不单独成组）。筛选（ROADMAP 阶段 5）必须作用于渲染、计数仍基于未筛选数据。
+- `grouping.ts` 是纯函数数据管线：`sortTasks` → `buildGroups` → `selectScope` → `countGroup`；同一棵树同时供左栏范围树计数和表格分组，不建第二份。**分组计数只算父任务**（子任务跟随父任务渲染，不单独成组）。阶段 5 的筛选只作用于渲染，计数仍基于未筛选数据；父任务不命中但子任务命中时，父行灰显为上下文。
 - `menu.ts` 是唯一的菜单实现（弹出/定位/关闭/键盘导航/子面板），三处共用：左栏右键菜单、任务行尾「…」、优先级浮窗。新增菜单不要另写一套。
 - 弹窗（`askConfirm` / `askText` / `askNote`）共用同一套 modal，**同一时刻只允许一个**——新弹窗会把上一个按取消收场，否则两个 `await` 抢同一批监听。
 - 新建项目是唯一的非弹窗输入形态，只有一个收尾出口 `resetProjectForm()`；打开时挂 `document` 监听，关闭时摘掉。
