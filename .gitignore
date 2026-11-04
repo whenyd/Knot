@@ -1,6 +1,7 @@
 # 本地工具状态（IDE / ThinkRail 上下文），不入库
 .openidea/
 .thinkrail/
+.vscode/
 
 # 构建产物
 node_modules/
