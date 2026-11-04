@@ -17,8 +17,6 @@ export interface MenuItem {
    * 可以嵌套，用来收拢"项目 → 模块 → 子模块"这类长列表。
    */
   children?: readonly MenuItem[];
-  /** 左侧色点（优先级用）。传 CSS 颜色，不传就不画。 */
-  dot?: string;
   /** 当前选中项：显示勾，并让屏幕阅读器读作 menuitemradio。 */
   checked?: boolean;
 }
@@ -229,13 +227,6 @@ function createEntry(session: OpenMenu, panel: Panel, item: MenuItem): PanelEntr
   button.setAttribute("role", item.checked === undefined ? "menuitem" : "menuitemradio");
   if (item.checked !== undefined) {
     button.setAttribute("aria-checked", String(item.checked));
-  }
-
-  if (item.dot !== undefined) {
-    const dot = document.createElement("span");
-    dot.className = "menu-dot";
-    dot.style.background = item.dot;
-    button.append(dot);
   }
 
   const label = document.createElement("span");

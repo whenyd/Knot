@@ -7,8 +7,8 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 /// 左栏最上方那个虚拟项目。它不是 `project` 表里的一行——
-/// "待办"由 `task.project_id IS NULL` 表达，这里只是它的显示名。
-pub const TODO_NAME: &str = "待办";
+/// "我的待办"由 `task.project_id IS NULL` 表达，这里只是它的显示名。
+pub const TODO_NAME: &str = "我的待办";
 
 type Res<T> = Result<T, String>;
 
@@ -90,7 +90,7 @@ impl Priority {
     }
 }
 
-/// 任务所在的容器：虚拟的「待办」，或某个真实项目。
+/// 任务所在的容器：虚拟的「我的待办」，或某个真实项目。
 ///
 /// 序列化成 `{ kind: "todo" }` / `{ kind: "project", id }`，前端原样回传。
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -101,7 +101,7 @@ pub enum Container {
 }
 
 impl Container {
-    /// 对应的 `task.project_id`（NULL 即「待办」）。
+    /// 对应的 `task.project_id`（NULL 即「我的待办」）。
     fn project_id(self) -> Option<i64> {
         match self {
             Container::Todo => None,
@@ -133,7 +133,7 @@ pub enum NodeKind {
     Submodule,
 }
 
-/// 左栏的一项：项目，或虚拟的「待办」（`id` 为 `None`、`is_todo` 为 `true`）。
+/// 左栏的一项：项目，或虚拟的「我的待办」（`id` 为 `None`、`is_todo` 为 `true`）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -227,7 +227,7 @@ const TASK_COLUMNS: &str = "id, project_id, module_id, submodule_id, parent_task
 // 读
 // ---------------------------------------------------------------------------
 
-/// 左栏全部条目：首项恒为「待办」，其余按 `sort_order`。
+/// 左栏全部条目：首项恒为「我的待办」，其余按 `sort_order`。
 pub fn list_projects(conn: &Connection) -> Res<Vec<Project>> {
     let todo_count: i64 = conn
         .query_row(
@@ -271,7 +271,7 @@ pub fn list_projects(conn: &Connection) -> Res<Vec<Project>> {
     Ok(out)
 }
 
-/// 项目的模块树（模块 + 其子模块）。"待办"没有模块，不调用这个命令。
+/// 项目的模块树（模块 + 其子模块）。"我的待办"没有模块，不调用这个命令。
 pub fn list_modules(conn: &Connection, project_id: i64) -> Res<Vec<Module>> {
     let mut stmt = conn
         .prepare("SELECT id, name FROM module WHERE project_id = ?1 ORDER BY sort_order, id")
@@ -402,7 +402,7 @@ pub fn rename_submodule(conn: &Connection, id: i64, name: &str) -> Res<Submodule
 /// 新建任务。`parent_task_id` 为 `Some` 时新建一层子任务。
 ///
 /// 顶层归属规则：容器给项目，`module_id`/`submodule_id` 由调用方按"当前范围"给出，
-/// 不给就是"未分类"。优先级默认"中"，排序号取**同一组内**最大值 + 1（排在组内最后）。
+/// 不给就是"默认"。优先级默认"中"，排序号取**同一组内**最大值 + 1（排在组内最后）。
 ///
 /// 子任务的归属真相在父任务上：容器必须与父任务一致，`module_id`/`submodule_id`
 /// 一律落 NULL（调用方传了也忽略）；排序号按父任务下的子任务单独排队。
@@ -1154,9 +1154,9 @@ fn require_submodule(conn: &Connection, module_id: i64, submodule_id: i64) -> Re
 
 /// 任务归属的唯一校验：新建与移动都走这里。
 ///
-/// 返回任务应落的 `project_id`（「待办」为 `None`）。规则：
+/// 返回任务应落的 `project_id`（「我的待办」为 `None`）。规则：
 /// 容器是项目时项目必须存在；带模块时模块必须属于该项目；
-/// 「待办」不能带模块；带子模块时必须先有模块，且子模块属于该模块。
+/// 「我的待办」不能带模块；带子模块时必须先有模块，且子模块属于该模块。
 fn require_task_target(
     conn: &Connection,
     container: Container,
@@ -1169,8 +1169,8 @@ fn require_task_target(
             require_project(conn, project_id)?;
             require_module(conn, project_id, module_id)?;
         }
-        // 「待办」没有模块，带模块归属是调用方的错
-        (None, Some(_)) => return Err("「待办」里的任务不属于任何模块".to_string()),
+        // 「我的待办」没有模块，带模块归属是调用方的错
+        (None, Some(_)) => return Err("「我的待办」里的任务不属于任何模块".to_string()),
         (Some(project_id), None) => require_project(conn, project_id)?,
         (None, None) => {}
     }
@@ -1229,7 +1229,7 @@ mod tests {
         .task;
 
         assert_eq!(task.project_id, Some(project_id));
-        assert_eq!(task.module_id, None, "新任务默认落在未分类");
+        assert_eq!(task.module_id, None, "新任务落在默认分组");
         assert_eq!(task.submodule_id, None);
         assert_eq!(task.priority.as_str(), "mid", "默认优先级为中");
         assert_eq!(task.status.as_str(), "todo");
@@ -1240,7 +1240,7 @@ mod tests {
         assert_eq!(tasks[0].title, "处理并发刷新");
     }
 
-    /// 「待办」不是一行项目：它由 `project_id IS NULL` 表达，且不混进项目列表。
+    /// 「我的待办」不是一行项目：它由 `project_id IS NULL` 表达，且不混进项目列表。
     #[test]
     fn todo_tasks_stay_out_of_projects() {
         let conn = conn();
@@ -1256,12 +1256,12 @@ mod tests {
         .unwrap();
 
         let projects = list_projects(&conn).unwrap();
-        assert!(projects[0].is_todo, "首项恒为「待办」");
+        assert!(projects[0].is_todo, "首项恒为「我的待办」");
         assert_eq!(projects[0].id, None);
         assert_eq!(projects[0].task_count, 1);
 
         let real = projects.iter().find(|p| p.id == project.id).unwrap();
-        assert_eq!(real.task_count, 0, "待办里的任务不算进项目");
+        assert_eq!(real.task_count, 0, "我的待办里的任务不算进项目");
 
         let tasks = list_tasks(&conn, Container::Todo).unwrap();
         assert_eq!(tasks.len(), 1);
@@ -1409,7 +1409,7 @@ mod tests {
         assert_eq!(task.submodule_id, Some(submodule));
     }
 
-    /// 排序号按**同一组**算：模块里的任务与未分类的任务各排各的。
+    /// 排序号按**同一组**算：模块里的任务与默认的任务各排各的。
     #[test]
     fn sort_order_is_per_group() {
         let conn = conn();
@@ -1419,7 +1419,7 @@ mod tests {
         let module = create_module(&conn, project_id, "认证").unwrap();
 
         assert_eq!(
-            create_task(&conn, container, None, None, None, "未分类的")
+            create_task(&conn, container, None, None, None, "默认的")
                 .unwrap()
                 .task
                 .sort_order,
@@ -1491,7 +1491,7 @@ mod tests {
         );
     }
 
-    /// 「待办」没有模块，带模块归属是调用方的错，不是默默把它当未分类。
+    /// 「我的待办」没有模块，带模块归属是调用方的错，不是默默把它当默认分组。
     #[test]
     fn rejects_module_on_todo_container() {
         let conn = conn();
@@ -2218,7 +2218,7 @@ mod tests {
     }
 
     /// 删模块：子模块、模块里的任务、子模块里的任务及其子任务一起消失，
-    /// 未分类任务与别的项目不受影响。
+    /// 默认任务与别的项目不受影响。
     #[test]
     fn delete_module_counts_submodule_tasks_and_cascades() {
         let conn = conn();
@@ -2310,8 +2310,8 @@ mod tests {
         assert!(modules[0].submodules.is_empty());
     }
 
-    /// 删项目：项目里的所有任务（含未分类、子任务）与模块树全部消失，
-    /// 待办和别的项目一条都不动。
+    /// 删项目：项目里的所有任务（含默认、子任务）与模块树全部消失，
+    /// 我的待办和别的项目一条都不动。
     #[test]
     fn delete_project_counts_all_tasks_and_cascades() {
         let conn = conn();
@@ -2335,7 +2335,7 @@ mod tests {
         insert_child(&conn, &in_submodule, "先写失败用例", Status::Todo);
         create_task(&conn, container, None, None, None, "整理文档").unwrap();
 
-        create_task(&conn, Container::Todo, None, None, None, "待办里的").unwrap();
+        create_task(&conn, Container::Todo, None, None, None, "我的待办里的").unwrap();
         create_task(
             &conn,
             Container::Project { id: kept },
@@ -2347,7 +2347,7 @@ mod tests {
         .unwrap();
 
         let plan = plan_delete_project(&conn, doomed).unwrap();
-        assert_eq!(plan.task_count, 4, "含未分类任务与子任务");
+        assert_eq!(plan.task_count, 4, "含默认任务与子任务");
         assert_eq!(
             list_tasks(&conn, container).unwrap().len(),
             4,
@@ -2369,7 +2369,7 @@ mod tests {
         let projects = list_projects(&conn).unwrap();
         assert_eq!(
             projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            vec!["待办", "支付网关"]
+            vec!["我的待办", "支付网关"]
         );
     }
 
@@ -2441,10 +2441,10 @@ mod tests {
         )
         .unwrap()
         .task;
-        let task = create_task(&conn, container, None, None, None, "未分类的")
+        let task = create_task(&conn, container, None, None, None, "默认的")
             .unwrap()
             .task;
-        assert_eq!(task.sort_order, 0, "未分类组从头数起");
+        assert_eq!(task.sort_order, 0, "默认组从头数起");
         assert_eq!(existing.sort_order, 0);
 
         let moved = move_task(
@@ -2509,7 +2509,7 @@ mod tests {
         assert_eq!(child_after.submodule_id, None);
     }
 
-    /// 移回「待办」等于清空三级分类；子任务的容器也一起清空。
+    /// 移回「我的待办」等于清空三级分类；子任务的容器也一起清空。
     #[test]
     fn move_task_to_todo_clears_classification() {
         let conn = conn();
@@ -2585,7 +2585,7 @@ mod tests {
                 module_id: Some(module_a.id),
                 submodule_id: Some(submodule_b),
             },
-            // 「待办」带模块
+            // 「我的待办」带模块
             MoveTarget {
                 container: Container::Todo,
                 module_id: Some(module_a.id),

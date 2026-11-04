@@ -66,7 +66,7 @@ fn show_startup_error(app: &tauri::AppHandle, message: &str) {
     let query = encode_query(message);
     let url = WebviewUrl::App(format!("index.html?startupError={query}").into());
     let built = WebviewWindowBuilder::new(app, "startup-error", url)
-        .title("无法启动 — 待办")
+        .title("无法启动 — 我的待办")
         .inner_size(760.0, 520.0)
         .build();
 

@@ -44,11 +44,6 @@ const STATUS_ORDER: Status[] = ["todo", "doing", "done"];
 // 优先级是浮窗选择：三档都摆出来，不用循环着找。
 const PRIORITY_ORDER: Priority[] = ["high", "mid", "low"];
 const PRIORITY_LABELS: Record<Priority, string> = { high: "高", mid: "中", low: "低" };
-const PRIORITY_DOTS: Record<Priority, string> = {
-  high: "#dc2626",
-  mid: "#d97706",
-  low: "#64748b",
-};
 
 interface State {
   projects: Project[];
@@ -227,7 +222,8 @@ function renderSideItem(project: Project): HTMLButtonElement {
     void selectProject(project);
   });
 
-  // 右键：项目上没有结构可管时不拦原生菜单（「待办」就属于这种）
+  // 右键：项目上没有结构可管时不打开菜单（「我的待办」就属于这种）。
+  // 原生右键菜单由 boot() 里的全局监听统一禁用。
   button.addEventListener("contextmenu", (event) => {
     if (project.isTodo || project.id === null) return;
     const projectId = project.id;
@@ -260,8 +256,8 @@ function currentProject(): Project | undefined {
 }
 
 /**
- * 左栏范围树：整个项目 / 模块 / 子模块 / 未分类。点哪个就把主视图限定在哪个子树。
- * 「待办」没有模块，也就没有这层树。
+ * 左栏范围树：整个项目 / 模块 / 子模块 / 默认。点哪个就把主视图限定在哪个子树。
+ * 「我的待办」没有模块，也就没有这层树。
  */
 function renderScopeTree(groups: Group[]): void {
   dom.scopeSection.replaceChildren();
@@ -427,17 +423,17 @@ function renderToolbar(groups: Group[]): void {
 
   renderFilters();
 
-  const base = currentProject()?.name ?? "待办";
+  const base = currentProject()?.name ?? "我的待办";
   dom.viewTitle.textContent =
     inProject && state.scope.kind !== "project" ? `${base} › ${scopeLabel(groups, state.scope)}` : base;
   dom.viewCount.textContent = total === 0 ? "暂无任务" : `${done}/${total}`;
 
   // 提示语跟着范围走：新任务会落到哪里，先写清楚，不要让人点完才知道。
-  // 「全部」与「未分类」的新任务都进未分类，提示也保持一致。
-  const target = state.scope.kind === "project" ? "未分类" : scopeLabel(groups, state.scope);
+  // 「全部」与「默认」的新任务都进默认分组，提示也保持一致。
+  const target = state.scope.kind === "project" ? "默认" : scopeLabel(groups, state.scope);
   dom.taskInput.placeholder = inProject
     ? `添加到「${target}」，回车保存（优先级中）`
-    : "添加任务，回车保存（默认“未分类 / 中”）";
+    : "添加任务，回车保存（优先级中）";
 }
 
 function currentFilters(): TaskFilters {
@@ -538,7 +534,7 @@ function renderTable(groups: Group[]): void {
   const filters = currentFilters();
   dom.body.replaceChildren();
 
-  // 「待办」没有模块，也就没有分组行：表格直接平铺。
+  // 「我的待办」没有模块，也就没有分组行：表格直接平铺。
   if (state.container.kind === "todo") {
     const parents = sortTasks(state.tasks.filter((task) => task.parentTaskId === null));
     for (const task of parents) {
@@ -550,7 +546,7 @@ function renderTable(groups: Group[]): void {
     setEmptyState(
       !hasMatch,
       parents.length === 0
-        ? "「待办」里还没有任务。在下面输入一行，回车保存。"
+        ? "「我的待办」里还没有任务。在下面输入一行，回车保存。"
         : "当前筛选下没有任务。调整上方的状态或优先级标签试试。",
     );
     focusSubtaskInput();
@@ -981,13 +977,13 @@ function moveTargetItem(task: Task, label: string, target: MoveTarget): MenuItem
 }
 
 /**
- * 移动目标按「项目 → 模块 → 子模块」折叠成树：默认只露出待办和项目，
- * 展开项目才看到未分类和模块，模块再展开才看到子模块。
+ * 移动目标按「项目 → 模块 → 子模块」折叠成树：默认只露出我的待办和项目，
+ * 展开项目才看到默认和模块，模块再展开才看到子模块。
  * 菜单里的短标签靠层级表达归属，不再重复写完整的 `项目 › 模块 › 子模块`。
  */
 async function moveMenuItems(task: Task): Promise<MenuItem[]> {
   const items: MenuItem[] = [];
-  const todo = moveTargetItem(task, "待办", {
+  const todo = moveTargetItem(task, "我的待办", {
     container: { kind: "todo" },
     moduleId: null,
     submoduleId: null,
@@ -1003,7 +999,7 @@ async function moveMenuItems(task: Task): Promise<MenuItem[]> {
     const container: Container = { kind: "project", id: project.id };
     const children: MenuItem[] = [];
 
-    const unclassified = moveTargetItem(task, "未分类", {
+    const unclassified = moveTargetItem(task, "默认", {
       container,
       moduleId: null,
       submoduleId: null,
@@ -1113,7 +1109,6 @@ function openPriorityMenu(anchor: HTMLButtonElement, task: Task): void {
   openMenu({
     items: choices.map((priority) => ({
       label: PRIORITY_LABELS[priority],
-      dot: PRIORITY_DOTS[priority],
       checked: priority === task.priority,
       onSelect: () => {
         if (priority !== task.priority) void applyPriority(task, priority);
@@ -1596,7 +1591,7 @@ function scopeInsideNode(kind: NodeKind, id: number): boolean {
   return false;
 }
 
-/** 删除项目：项目里的任务一并删除；正停在这个项目就回落到「待办」。 */
+/** 删除项目：项目里的任务一并删除；正停在这个项目就回落到「我的待办」。 */
 async function deleteProjectFlow(project: Project): Promise<void> {
   if (project.id === null) return;
   const id = project.id;
@@ -1642,7 +1637,7 @@ async function resetDatabaseFlow(): Promise<void> {
 
   try {
     await api.resetDatabase();
-    // 库已经换了一份：视图回到「待办」，旧的分组/折叠键全部失效。
+    // 库已经换了一份：视图回到「我的待办」，旧的分组/折叠键全部失效。
     state.container = { kind: "todo" };
     state.scope = { kind: "project" };
     state.collapsedNodes.clear();
@@ -1744,7 +1739,7 @@ if (document.readyState === "loading") {
  * 后端在 setup 里把主窗口换成 `index.html?startupError=...`，这里直接接管。
  */
 function renderStartupError(message: string): void {
-  document.title = "无法启动 — 待办";
+  document.title = "无法启动 — 我的待办";
   document.body.classList.add("startup-error-body");
 
   const panel = el("main", "startup-error");
@@ -1773,6 +1768,11 @@ function boot(): void {
     renderStartupError(startupError);
     return;
   }
+  // 原生右键菜单在应用里没有用处；项目与范围节点会各自 preventDefault
+  // 并打开自己的菜单，这里统一兜底禁用其余位置的浏览器菜单。
+  document.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+  });
   render();
   void reload();
 }

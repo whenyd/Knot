@@ -56,7 +56,7 @@ describe("buildGroups", () => {
     makeModule(20, "后端"),
   ];
 
-  it("按子模块、模块、未分类归组；子任务不单独成组", () => {
+  it("按子模块、模块、默认归组；子任务不单独成组", () => {
     const groups = buildGroups(
       [
         makeTask({ id: 1, moduleId: 10, submoduleId: 100 }),
@@ -71,7 +71,7 @@ describe("buildGroups", () => {
     expect(groups.map((group) => [group.kind, group.id, group.label])).toEqual([
       ["module", 10, "前端"],
       ["module", 20, "后端"],
-      ["unclassified", null, "未分类"],
+      ["unclassified", null, "默认"],
     ]);
     expect(groups[0].tasks.map((task) => task.id)).toEqual([2]);
     expect(groups[0].children[0].tasks.map((task) => task.id)).toEqual([1]);
@@ -80,7 +80,7 @@ describe("buildGroups", () => {
     expect(groups[2].tasks.map((task) => task.id)).toEqual([3]);
   });
 
-  it("用户建的模块和子模块即使为空也保留，空未分类不出现", () => {
+  it("用户建的模块和子模块即使为空也保留，空默认分组不出现", () => {
     const groups = buildGroups([], [makeModule(10, "空模块", [{ id: 100, name: "空子模块" }])]);
 
     expect(groups).toHaveLength(1);
@@ -133,7 +133,7 @@ describe("selectScope", () => {
     expect(selectScope(groups, { kind: "project" })).toHaveLength(3);
   });
 
-  it("模块只返回该模块，未分类只返回未分类组", () => {
+  it("模块范围只返回该模块，默认范围只返回默认组", () => {
     expect(selectScope(groups, { kind: "module", id: 20 }).map((group) => group.id)).toEqual([20]);
     expect(
       selectScope(groups, { kind: "unclassified" }).map((group) => group.kind),
@@ -157,7 +157,7 @@ describe("selectScope", () => {
 describe("resolveTarget", () => {
   const groups = buildGroups([], [makeModule(10, "前端", [{ id: 100, name: "样式" }])]);
 
-  it("项目与未分类落到未分类位置", () => {
+  it("项目与默认分组落到默认位置", () => {
     expect(resolveTarget(groups, { kind: "project" })).toEqual({
       moduleId: null,
       submoduleId: null,
@@ -182,7 +182,7 @@ describe("resolveTarget", () => {
     });
   });
 
-  it("找不到归属的子模块回退到未分类", () => {
+  it("找不到归属的子模块回退到默认", () => {
     expect(resolveTarget(groups, { kind: "submodule", id: 999 })).toEqual({
       moduleId: null,
       submoduleId: null,

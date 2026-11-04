@@ -4,13 +4,13 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>待办</title>
+    <title>我的待办</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
   <body>
     <div class="app">
-      <!-- 左栏：最上方恒为「待办」，下面才是项目分段与项目列表 -->
+      <!-- 左栏：最上方恒为「我的待办」，下面才是项目分段与项目列表 -->
       <aside class="sidebar">
         <nav class="side-group" id="todo-section"></nav>
 
@@ -27,7 +27,7 @@
         </form>
         <button class="side-add" id="project-add" type="button">＋ 新建项目</button>
 
-        <!-- 范围树：全部 / 模块 / 子模块 / 未分类。「待办」没有这层。
+        <!-- 范围树：全部 / 模块 / 子模块 / 默认。「我的待办」没有这层。
              新建与重命名的入口都在右键菜单里，这里不再摆按钮。 -->
         <div class="side-heading" id="scope-heading">范围</div>
         <nav class="side-group" id="scope-section"></nav>
@@ -40,7 +40,7 @@
 
       <main class="main">
         <header class="toolbar">
-          <h1 class="view-title" id="view-title">待办</h1>
+          <h1 class="view-title" id="view-title">我的待办</h1>
           <span class="badge" id="view-count"></span>
           <div class="filter-groups" id="filters" aria-label="任务筛选"></div>
         </header>
@@ -71,7 +71,7 @@
         <form class="add" id="task-form">
           <input
             id="task-input"
-            placeholder="添加任务，回车保存（默认“未分类 / 中”）"
+            placeholder="添加任务，回车保存（优先级中）"
             autocomplete="off"
             spellcheck="false"
           />

@@ -7,7 +7,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
-/** 任务所在的容器：虚拟的「待办」，或某个真实项目。 */
+/** 任务所在的容器：虚拟的「我的待办」，或某个真实项目。 */
 export type Container = { kind: "todo" } | { kind: "project"; id: number };
 
 export type Status = "todo" | "doing" | "done";
@@ -28,7 +28,7 @@ export interface MoveTarget extends ScopeTarget {
 }
 
 export interface Project {
-  /** 「待办」没有 id —— 它不是数据库里的一行。 */
+  /** 「我的待办」没有 id —— 它不是数据库里的一行。 */
   id: number | null;
   name: string;
   isTodo: boolean;

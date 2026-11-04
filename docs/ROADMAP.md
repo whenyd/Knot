@@ -20,7 +20,7 @@ plan_delete_task / delete_task
 reset_database   // 仅 dev build 注册；release 不注册、前端不显示入口
 ```
 
-界面：左栏（待办 + 项目 + 范围树 + **右键菜单**）、固定按模块分组的表格（分组折叠、子树计数）、
+界面：左栏（我的待办 + 项目 + 范围树 + **右键菜单**）、固定按模块分组的表格（分组折叠、子树计数）、
 状态点击循环三态、优先级浮窗、双击就地改名、**新建任务落入当前范围**、应用内确认框、输入弹窗与
 **多行备注弹窗**、**任务行尾「…」菜单**（移动到任意归类 + 删除）、
 **三级结构删除**（确认框告知连带任务数，删除后自动回落视图）、
@@ -50,7 +50,7 @@ reset_database   // 仅 dev build 注册；release 不注册、前端不显示�
 
 ### D1 · 删除模块时，里面的任务去哪？—— **已定：确认后一并删除**
 
-- 结论：删除模块/子模块时，组内任务**真删**（先弹窗告知条数），不退回未分类。
+- 结论：删除模块/子模块时，组内任务**真删**（先弹窗告知条数），不退回默认。
 - 已同步：`docs/specs/goal-and-requirements.md`「删除」去掉了“（推断）”；`docs/specs/architecture.md` 的 schema 把 `task.module_id` / `submodule_id` 改成 `ON DELETE CASCADE`，并写明为什么需要一条 v2 迁移（v1 已发布为 `SET NULL`，历史条目不能改）。
 - 连带结论：删项目同样是“带走它的所有任务”——`project_id` 本来就是 `CASCADE`，无需迁移。
 
@@ -94,7 +94,7 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 | --- | --- | --- | --- | --- |
 | ~~T4~~ | ✅ **删除任务**（已完成） | `plan_delete_task(id) -> { taskCount }` / `delete_task(id)` + 任务行尾「…」菜单（第一版只有删除） | 确认框告知条数（含子任务）；删完列表少一行 | — |
 | ~~T5~~ | ✅ **删除模块 / 子模块**（已完成） | **迁移 v2**：新建 task 表 → 拷数据 → 删旧表 → 改名 → 重建索引，把 `module_id` / `submodule_id` 改成 `ON DELETE CASCADE`；然后 `plan_delete_node(kind, id)` / `delete_node(kind, id)` + 菜单项（`kind = module` / `submodule`） | 存量库能升到 v2 且 `foreign_key_check` 通过；删模块时它的子模块与任务一并消失；条数包含子模块里的任务；若正停在被删范围则回落到「全部」 | D1、T1 |
-| ~~T6~~ | ✅ **删除项目**（已完成） | `plan_delete_project(id)` / `delete_project(id)` + 菜单项 | 条数含全项目任务；删完若正停在该项目则回落到「待办」 | D1、T1 |
+| ~~T6~~ | ✅ **删除项目**（已完成） | `plan_delete_project(id)` / `delete_project(id)` + 菜单项 | 条数含全项目任务；删完若正停在该项目则回落到「我的待办」 | D1、T1 |
 | ~~T7~~ | ✅ **把剩下两处菜单并进 `src/menu.ts`**（已完成） | `src/menu.ts` 已是通用组件（T1 建好）；任务行菜单（T4 引入）直接用它；优先级浮窗（`main.ts` 里原来的 `.picker`）也改用它 | 只有一份“弹出/定位/关闭”的实现；优先级浮窗的方向键与 Esc 行为不变 | T1、T4 |
 
 ### 阶段 3 · 备注与归类移动 — 已完成
@@ -111,7 +111,7 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 | # | 任务 | 改动位置 | 验收 | 依赖 |
 | --- | --- | --- | --- | --- |
 | ~~T10~~ | ✅ **新建子任务**（已完成） | `create_task` 增加 `parent_task_id`，返回 `{ task, notices }`；后端校验一层限制与容器一致，子任务强制 `module_id`/`submodule_id = NULL`，排序号按父任务分组 `MAX+1` | 子任务不能挂子任务（后端拒）；子任务不出现在任何分组行里 | — |
-| ~~T11~~ | ✅ **子任务渲染**（已完成） | `main.ts` 按 `parentTaskId` 建索引，在待办平铺与分组表格里都渲染缩进子行；父行折叠箭头默认展开，行内「＋」加子任务（回车连续添加、Esc 取消、失焦保存非空） | 分组计数仍只算父任务 | T10 |
+| ~~T11~~ | ✅ **子任务渲染**（已完成） | `main.ts` 按 `parentTaskId` 建索引，在我的待办平铺与分组表格里都渲染缩进子行；父行折叠箭头默认展开，行内「＋」加子任务（回车连续添加、Esc 取消、失焦保存非空） | 分组计数仍只算父任务 | T10 |
 | ~~T12~~ | ✅ **父子状态聚合**（已完成） | `domain.rs` 内 `aggregate_parent_status` + 三处触发（子状态变、子新增、子删除），同一事务；字面规则含零子任务空真；`showNotice` 改为 FIFO 队列 | 轻提示出现且不阻塞；**手动退回父任务时子任务不动**；多条提示排队而不是互相顶掉 | T10、T11 |
 | ~~T13~~ | ✅ **级联确认接活**（已完成） | 前端既有 `needs_confirm` 分支与 `askConfirm` 在 T10 之后第一次真的能被触发；补测试 | 父任务有未完成子任务时标完成 → 弹窗告知条数 → 确认后一并完成 | T10 |
 | ~~T14~~ | ✅ **删除子任务走聚合**（已完成） | `delete_task` 改为事务内删除 + 聚合，返回 `DeleteOutcome { notices }` | 删掉最后一个未完成子任务 → 父变 `done` + 轻提示 | T12、T4 |
@@ -168,6 +168,9 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 - 测试数据用工厂函数直接造 `Task` / `Module`；`resolveTarget` 的子模块用例同时断言 `moduleId` 与 `submoduleId`，作为“实现退化成只给 submoduleId 就会红”的守门用例。
 - 测试文件放在 `src/` 下，因此 `tsc --noEmit` 也会检查它；`vite build` 不会把测试打进产物。
 - T21 只用系统已有能力：本机没有 WiX/NSIS，项目已归档，不再下载 bundler；改用 `npx tauri build --no-bundle` 验证 release exe 与库/FK 行为，安装包部分跳过。
+- 界面用词统一为「我的待办」「默认」：前者是虚拟容器的显示名（`TODO_NAME`），后者是模块归属为空的派生分组；源码、错误文案、文档与测试一起改，避免两个名字各说各的。
+- 状态筛选 chip 去掉圆形伪元素，任务优先级列与浮窗也去掉圆点：文字与颜色已经足够表达，重复的圆点让筛选行显得拥挤；行首状态按钮保留，否则状态无法修改。
+- 原生右键菜单在应用内全局禁用，只让左栏项目/范围节点的自定义菜单接管 `contextmenu`；表格与空白处不再弹出浏览器的“另存为/检查”等无关项。
 
 ---
 
@@ -178,6 +181,6 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 1. `cargo test`（后端规则）+ `npm test`（前端纯函数）+ `npx tsc --noEmit`（前端类型）+ `vite build`。
 2. **涉及界面的改动**：用 `@tauri-apps/api/mocks` 的 `mockIPC` 把 `src/main.ts` 挂到 `index.html` 的结构上，起 `npx vite --port 1420`，再用无头 Edge 截图人工核对。
    - 需要验证调用链时，让 mock 后端**有状态**（`create_task` 真的往数组里追加、`list_tasks` 真的返回它），脚本模拟点击/输入。
-   - **收尾时按端口找 PID 再 `taskkill //F //PID`**：`background_command stop` 杀不掉 `npx` 拉起的子进程，会占着 1420 让 `tauri dev` 起不来。
+   - **收尾时按端口找 PID 再 `taskkill /F /PID`**：`background_command stop` 杀不掉 `npx` 拉起的子进程，会占着 1420 让 `tauri dev` 起不来。
 3. 真实窗口 `npm run tauri dev` 过一遍交互——截图能证明渲染，证明不了“点下去之后数据对不对”。
 4. 收尾把规格改动写回 `docs/specs/goal-and-requirements.md` / `docs/specs/architecture.md`，再更新本文件的状态。

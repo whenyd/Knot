@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "待办",
+        "title": "我的待办",
         "width": 1040,
         "height": 720,
         "minWidth": 720,

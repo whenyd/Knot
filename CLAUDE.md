@@ -43,9 +43,9 @@ npm run tauri build                        # release 安装包（NSIS / MSI；�
 
 ## 数据模型与迁移
 
-- 「待办」不是一条项目记录，而是 `task.project_id IS NULL`。
+- 「我的待办」不是一条项目记录，而是 `task.project_id IS NULL`。
 - 分类是 `project → module → submodule`；子任务只有一层（`parent_task_id`），且子任务不存 `module_id`/`submodule_id`——归属真相在父任务，后端拒绝“子任务挂子任务”。
-- 删除一律“删父带走子”：项目/模块/子模块/父任务的外键都是 `CASCADE`。删除模块时组内任务是真删，不是退回未分类（D1 已定）。
+- 删除一律“删父带走子”：项目/模块/子模块/父任务的外键都是 `CASCADE`。删除模块时组内任务是真删，不是退回默认（D1 已定）。
 - 迁移用 `PRAGMA user_version`，`MIGRATIONS: &[&str]` 顺序执行。**已发布的条目一个字都不要改**（v1 把分类外键写成 `SET NULL` 的历史无法修改，v2 靠“建新表→拷贝→删旧表→改名”改成 `CASCADE`）。只写前进，不写 down。
 - 迁移整段包在单个事务里；事务前关 `foreign_keys`（事务内是 no-op），`PRAGMA foreign_key_check` 在**提交之前**跑，失败连 `user_version` 一起回滚。每个连接打开时显式 `PRAGMA foreign_keys = ON`。
 - 迁移前自动备份：仅旧库升级（`0 < user_version < 最新版本`）时生成 `tasks.sqlite.bak-v<旧版本>-<epoch 毫秒>`，保留最近 5 份（只清理 `bak-v*`）；备份失败即停止迁移。迁移失败由 `lib.rs` 开一个 `?startupError=` 错误窗口显示原因与备份路径，不再 panic。`reset_database` 只在 debug 注册、按钮只在 `import.meta.env.DEV` 显示，正式版没有这条路径。
@@ -57,7 +57,7 @@ npm run tauri build                        # release 安装包（NSIS / MSI；�
 - `menu.ts` 是唯一的菜单实现（弹出/定位/关闭/键盘导航/子面板），三处共用：左栏右键菜单、任务行尾「…」、优先级浮窗。新增菜单不要另写一套。
 - 弹窗（`askConfirm` / `askText` / `askNote`）共用同一套 modal，**同一时刻只允许一个**——新弹窗会把上一个按取消收场，否则两个 `await` 抢同一批监听。
 - 新建项目是唯一的非弹窗输入形态，只有一个收尾出口 `resetProjectForm()`；打开时挂 `document` 监听，关闭时摘掉。
-- 删除后的回落：删模块/子模块时若 `scope` 在被删子树内 → 回项目「全部」；删项目时若正停在该项目 → 回「待办」。
+- 删除后的回落：删模块/子模块时若 `scope` 在被删子树内 → 回项目「全部」；删项目时若正停在该项目 → 回「我的待办」。
 
 ## 界面验证约定
 

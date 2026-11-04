@@ -37,7 +37,7 @@ CREATE TABLE submodule (
 
 CREATE TABLE task (
   id             INTEGER PRIMARY KEY,
-  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,  -- NULL = 「待办」
+  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,  -- NULL = 「我的待办」
   module_id      INTEGER REFERENCES module(id) ON DELETE SET NULL,
   submodule_id   INTEGER REFERENCES submodule(id) ON DELETE SET NULL,
   parent_task_id INTEGER REFERENCES task(id) ON DELETE CASCADE,     -- NULL = 顶层任务
@@ -60,7 +60,7 @@ CREATE INDEX idx_task_parent  ON task(parent_task_id);
 const V2_TASK_CLASSIFICATION_CASCADE: &str = r#"
 CREATE TABLE task_v2 (
   id             INTEGER PRIMARY KEY,
-  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,  -- NULL = 「待办」
+  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,  -- NULL = 「我的待办」
   module_id      INTEGER REFERENCES module(id) ON DELETE CASCADE,
   submodule_id   INTEGER REFERENCES submodule(id) ON DELETE CASCADE,
   parent_task_id INTEGER REFERENCES task_v2(id) ON DELETE CASCADE,  -- NULL = 顶层任务

@@ -1,6 +1,6 @@
 /*
  * 样式取自定稿原型 .thinkrail/context/mockups/final-grouped-table.html。
- * 布局只有两块：左栏（待办 + 项目）+ 主区（工具栏 + 分组表格 + 添加行）。
+ * 布局只有两块：左栏（我的待办 + 项目）+ 主区（工具栏 + 分组表格 + 添加行）。
  */
 
 :root {
@@ -204,7 +204,6 @@ body {
 
 .filter-chip {
   display: inline-flex;
-  gap: 4px;
   align-items: center;
   padding: 2px 7px;
   border: 1px solid var(--line);
@@ -215,15 +214,6 @@ body {
   font-size: 12px;
   line-height: 1.4;
   cursor: pointer;
-}
-
-.filter-chip::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border: 1px solid currentColor;
-  border-radius: 50%;
-  background: transparent;
 }
 
 .filter-chip:hover {
@@ -240,12 +230,6 @@ body {
   border-color: #c7d2fe;
   background: var(--accent-soft);
   color: var(--accent);
-}
-
-.filter-chip[aria-pressed="true"]::before {
-  border-color: currentColor;
-  background: currentColor;
-  box-shadow: inset 0 0 0 1px var(--accent-soft);
 }
 
 .filter-chip[data-priority="high"][aria-pressed="true"] {
@@ -548,21 +532,12 @@ button.note:focus-visible {
 /* 优先级：颜色 + 文字，不只靠颜色 */
 .priority {
   display: inline-flex;
-  gap: 5px;
   align-items: center;
   padding: 1px 7px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fff;
   font-size: 12.5px;
-}
-
-.priority::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
 }
 
 .priority-high {
@@ -661,7 +636,7 @@ button.note:focus-visible {
 /* 输入框不加描边：它自己那圈 1px 蓝色边框就是"正在编辑"的信号。
    再加上 outline 会变成两层同心圆，看上去像边框变粗了。 */
 
-/* 优先级按钮的圆点由 .priority::before 画，按钮只多一个光标手势 */
+/* 优先级按钮只靠文字与配色区分，不再额外画圆点 */
 .cell-priority {
   overflow: hidden;
 }
@@ -944,13 +919,6 @@ button.group-caret.is-collapsed::before {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-}
-
-.menu-dot {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
 }
 
 .menu-check {

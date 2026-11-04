@@ -31,9 +31,9 @@ export function sortTasks(tasks: readonly Task[]): Task[] {
 }
 
 /**
- * 主视图的范围：整个项目 / 某个模块 / 某个子模块 / 未分类。
+ * 主视图的范围：整个项目 / 某个模块 / 某个子模块 / 默认。
  *
- * 「待办」没有这层树，所以它不出现在这里——待办视图恒为整个容器。
+ * 「我的待办」没有这层树，所以它不出现在这里——我的待办视图恒为整个容器。
  */
 export type Scope =
   | { kind: "project" }
@@ -41,10 +41,10 @@ export type Scope =
   | { kind: "submodule"; id: number }
   | { kind: "unclassified" };
 
-/** 一个分组（模块、子模块，或「未分类」）。 */
+/** 一个分组（模块、子模块，或「默认」）。 */
 export interface Group {
   kind: "module" | "submodule" | "unclassified";
-  /** 「未分类」是派生分组，没有 id。 */
+  /** 「默认」是派生分组，没有 id。 */
   id: number | null;
   label: string;
   /** 0 = 模块（或提升为范围的子模块）；1 = 缩进一级的子模块。 */
@@ -56,7 +56,7 @@ export interface Group {
 /**
  * 按模块建树分组。位置即分类：模块/子模块不占列，只当分组行。
  *
- * 任务归属优先级：`submoduleId` > `moduleId` > 未分类。子任务不单独成组，
+ * 任务归属优先级：`submoduleId` > `moduleId` > 默认。子任务不单独成组，
  * 由渲染器跟在父任务下面（本切片还不建子任务）。
  */
 export function buildGroups(tasks: readonly Task[], modules: readonly Module[]): Group[] {
@@ -77,7 +77,7 @@ export function buildGroups(tasks: readonly Task[], modules: readonly Module[]):
   const take = (key: string) => sortTasks(store.get(key) ?? []);
 
   // 用户建的模块与子模块一律保留，即使暂时是 0/0：它们是结构，
-  // 藏起来会让人以为没建成；「未分类」是派生分组，空时不占一行。
+  // 藏起来会让人以为没建成；「默认」是派生分组，空时不占一行。
   const groups: Group[] = modules.map((module) => ({
     kind: "module",
     id: module.id,
@@ -99,7 +99,7 @@ export function buildGroups(tasks: readonly Task[], modules: readonly Module[]):
     groups.push({
       kind: "unclassified",
       id: null,
-      label: "未分类",
+      label: "默认",
       depth: 0,
       tasks: unclassified,
       children: [],
@@ -167,7 +167,7 @@ export function scopeLabel(groups: readonly Group[], scope: Scope): string {
     case "project":
       return "全部";
     case "unclassified":
-      return "未分类";
+      return "默认";
     case "module":
       return groups.find((g) => g.kind === "module" && g.id === scope.id)?.label ?? "模块";
     case "submodule":
@@ -182,7 +182,7 @@ export function scopeLabel(groups: readonly Group[], scope: Scope): string {
 /**
  * 当前范围对应的任务归属：新建任务就落在这里。
  *
- * “全部”与“未分类”都是没有分类的位置，新任务自然进未分类。
+ * “全部”与“默认”都是没有分类的位置，新任务自然进默认。
  */
 export function resolveTarget(groups: readonly Group[], scope: Scope): ScopeTarget {
   switch (scope.kind) {
