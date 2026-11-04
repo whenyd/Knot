@@ -6,8 +6,8 @@ use tauri::State;
 
 use crate::db::Db;
 use crate::domain::{
-    self, Container, DeletePlan, Module, MoveTarget, NodeKind, Priority, Project, Status,
-    StatusOutcome, StatusPlan, Submodule, Task,
+    self, Container, DeleteOutcome, DeletePlan, Module, MoveTarget, NodeKind, Priority, Project,
+    Status, StatusOutcome, StatusPlan, Submodule, Task, TaskCreated,
 };
 
 #[tauri::command]
@@ -26,11 +26,7 @@ pub fn list_modules(db: State<'_, Db>, project_id: i64) -> Result<Vec<Module>, S
 }
 
 #[tauri::command]
-pub fn create_module(
-    db: State<'_, Db>,
-    project_id: i64,
-    name: String,
-) -> Result<Module, String> {
+pub fn create_module(db: State<'_, Db>, project_id: i64, name: String) -> Result<Module, String> {
     domain::create_module(&db.conn(), project_id, &name)
 }
 
@@ -69,9 +65,17 @@ pub fn create_task(
     container: Container,
     module_id: Option<i64>,
     submodule_id: Option<i64>,
+    parent_task_id: Option<i64>,
     title: String,
-) -> Result<Task, String> {
-    domain::create_task(&db.conn(), container, module_id, submodule_id, &title)
+) -> Result<TaskCreated, String> {
+    domain::create_task(
+        &db.conn(),
+        container,
+        module_id,
+        submodule_id,
+        parent_task_id,
+        &title,
+    )
 }
 
 #[tauri::command]
@@ -95,11 +99,7 @@ pub fn set_priority(db: State<'_, Db>, id: i64, priority: Priority) -> Result<Ta
 }
 
 #[tauri::command]
-pub fn plan_set_status(
-    db: State<'_, Db>,
-    id: i64,
-    status: Status,
-) -> Result<StatusPlan, String> {
+pub fn plan_set_status(db: State<'_, Db>, id: i64, status: Status) -> Result<StatusPlan, String> {
     domain::plan_set_status(&db.conn(), id, status)
 }
 
@@ -119,16 +119,12 @@ pub fn plan_delete_task(db: State<'_, Db>, id: i64) -> Result<DeletePlan, String
 }
 
 #[tauri::command]
-pub fn delete_task(db: State<'_, Db>, id: i64) -> Result<(), String> {
+pub fn delete_task(db: State<'_, Db>, id: i64) -> Result<DeleteOutcome, String> {
     domain::delete_task(&db.conn(), id)
 }
 
 #[tauri::command]
-pub fn plan_delete_node(
-    db: State<'_, Db>,
-    kind: NodeKind,
-    id: i64,
-) -> Result<DeletePlan, String> {
+pub fn plan_delete_node(db: State<'_, Db>, kind: NodeKind, id: i64) -> Result<DeletePlan, String> {
     domain::plan_delete_node(&db.conn(), kind, id)
 }
 

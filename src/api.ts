@@ -80,6 +80,17 @@ export interface DeletePlan {
   taskCount: number;
 }
 
+/** `create_task` 的返回：任务本体 + 父任务被聚合自动改动时的轻提示。 */
+export interface TaskCreated {
+  task: Task;
+  notices: string[];
+}
+
+/** `delete_task` 的返回：删掉子任务后父任务被自动改动时的轻提示。 */
+export interface DeleteOutcome {
+  notices: string[];
+}
+
 export const api = {
   listProjects: () => invoke<Project[]>("list_projects"),
   createProject: (name: string) => invoke<Project>("create_project", { name }),
@@ -93,8 +104,12 @@ export const api = {
   renameSubmodule: (id: number, name: string) =>
     invoke<Submodule>("rename_submodule", { id, name }),
   listTasks: (container: Container) => invoke<Task[]>("list_tasks", { container }),
-  createTask: (container: Container, target: ScopeTarget, title: string) =>
-    invoke<Task>("create_task", { container, ...target, title }),
+  createTask: (
+    container: Container,
+    target: ScopeTarget,
+    title: string,
+    parentTaskId: number | null = null,
+  ) => invoke<TaskCreated>("create_task", { container, ...target, parentTaskId, title }),
   renameTask: (id: number, title: string) => invoke<Task>("rename_task", { id, title }),
   setNote: (id: number, note: string) => invoke<Task>("set_note", { id, note }),
   moveTask: (id: number, target: MoveTarget) => invoke<Task>("move_task", { id, target }),
@@ -108,7 +123,7 @@ export const api = {
     invoke<StatusOutcome>("apply_set_status", { id, status, cascade }),
   /** 删除任务的第一步：只数会删掉几条（含子任务），不写库。 */
   planDeleteTask: (id: number) => invoke<DeletePlan>("plan_delete_task", { id }),
-  deleteTask: (id: number) => invoke<void>("delete_task", { id }),
+  deleteTask: (id: number) => invoke<DeleteOutcome>("delete_task", { id }),
   /** 删除模块 / 子模块的第一步：只数会删掉几条（含子模块里的任务），不写库。 */
   planDeleteNode: (kind: NodeKind, id: number) =>
     invoke<DeletePlan>("plan_delete_node", { kind, id }),

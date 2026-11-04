@@ -52,8 +52,8 @@ pub fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 /// 打开连接 → 外键 ON → 迁移。
 pub fn open(path: &Path) -> Result<Connection, String> {
-    let mut conn = Connection::open(path)
-        .map_err(|e| format!("无法打开数据库 {}：{e}", path.display()))?;
+    let mut conn =
+        Connection::open(path).map_err(|e| format!("无法打开数据库 {}：{e}", path.display()))?;
 
     // SQLite 默认关闭外键，每个连接都要显式打开，否则 ON DELETE 级联静默失效。
     conn.pragma_update(None, "foreign_keys", true)

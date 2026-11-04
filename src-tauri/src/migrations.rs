@@ -125,8 +125,7 @@ fn apply_all(conn: &mut Connection, from: usize) -> Result<(), String> {
             .map_err(|e| format!("迁移到版本 {} 后写 user_version 失败：{e}", i + 1))?;
     }
 
-    tx.commit()
-        .map_err(|e| format!("提交迁移事务失败：{e}"))
+    tx.commit().map_err(|e| format!("提交迁移事务失败：{e}"))
 }
 
 /// 提交后跑一次全库外键检查：级联规则写错了，要在这里就炸，而不是等到某次删除。

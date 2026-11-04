@@ -53,6 +53,10 @@ interface State {
   collapsedNodes: Set<number>;
   /** 表格里收起的分类分组，key 由 `groupKey` 生成。与左栏的收起互不影响。 */
   collapsedGroups: Set<string>;
+  /** 正在内联添加子任务的父任务 id；同一时刻只有一个。 */
+  addingSubtaskFor: number | null;
+  /** 表格里收起了子任务的父任务 id。默认展开，所以存的是收起的那几个。 */
+  collapsedTasks: Set<number>;
 }
 
 const state: State = {
@@ -63,7 +67,14 @@ const state: State = {
   tasks: [],
   collapsedNodes: new Set(),
   collapsedGroups: new Set(),
+  addingSubtaskFor: null,
+  collapsedTasks: new Set(),
 };
+
+/** 内联子任务输入框的草稿：放在状态对象外，无关重绘也不丢正在打的字。 */
+let subtaskDraft = "";
+/** 输入会话号：旧的失焦回调只认自己那一轮，免得点「＋」时误提交上一轮。 */
+let subtaskInputSession = 0;
 
 // ---------------------------------------------------------------------------
 // DOM
@@ -125,6 +136,7 @@ async function reload(): Promise<void> {
     const container = state.container;
     state.modules = container.kind === "project" ? await api.listModules(container.id) : [];
     state.tasks = await api.listTasks(container);
+    pruneSubtaskInput();
     render();
   } catch (error) {
     showNotice(describe(error), "error");
@@ -138,8 +150,23 @@ async function selectProject(project: Project): Promise<void> {
   state.scope = { kind: "project" };
   state.collapsedNodes.clear();
   state.collapsedGroups.clear();
+  state.collapsedTasks.clear();
+  state.addingSubtaskFor = null;
+  subtaskDraft = "";
   closeMenu();
   await reload();
+}
+
+/** 父任务没了（删除或换容器）就把内联输入收回，别停在一个不存在的父任务上。 */
+function pruneSubtaskInput(): void {
+  if (state.addingSubtaskFor === null) return;
+  const parent = state.tasks.find(
+    (task) => task.id === state.addingSubtaskFor && task.parentTaskId === null,
+  );
+  if (!parent) {
+    state.addingSubtaskFor = null;
+    subtaskDraft = "";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -390,23 +417,41 @@ function renderToolbar(groups: Group[]): void {
       : "添加任务，回车保存（默认“未分类 / 中”）";
 }
 
+/** 子任务按父任务归桶；桶内与组内父任务同一套排序（优先级 → 添加顺序）。 */
+function groupChildren(tasks: readonly Task[]): Map<number, Task[]> {
+  const map = new Map<number, Task[]>();
+  for (const task of tasks) {
+    if (task.parentTaskId === null) continue;
+    const bucket = map.get(task.parentTaskId);
+    if (bucket) bucket.push(task);
+    else map.set(task.parentTaskId, [task]);
+  }
+  for (const [parentId, children] of map) map.set(parentId, sortTasks(children));
+  return map;
+}
+
 function renderTable(groups: Group[]): void {
+  const childrenByParent = groupChildren(state.tasks);
   dom.body.replaceChildren();
 
   // 「待办」没有模块，也就没有分组行：表格直接平铺。
   if (state.container.kind === "todo") {
     const parents = sortTasks(state.tasks.filter((task) => task.parentTaskId === null));
-    for (const task of parents) dom.body.append(renderTaskRow(task));
+    for (const task of parents) {
+      renderTaskTree(task, childrenByParent.get(task.id) ?? [], dom.body);
+    }
     setEmptyState(parents.length === 0, "「待办」里还没有任务");
+    focusSubtaskInput();
     return;
   }
 
   const visible = selectScope(groups, state.scope);
-  for (const group of visible) renderGroup(group, dom.body);
+  for (const group of visible) renderGroup(group, dom.body, childrenByParent);
 
   const { total } = countGroups(visible);
   const where = state.scope.kind === "project" ? "这个项目" : `「${scopeLabel(groups, state.scope)}」`;
   setEmptyState(total === 0, `${where}还没有任务`);
+  focusSubtaskInput();
 }
 
 function setEmptyState(empty: boolean, message: string): void {
@@ -418,8 +463,12 @@ function groupKey(group: Group): string {
   return `${group.kind}:${group.id ?? "-"}`;
 }
 
-/** 深度优先：分组行 → 组内任务 → 子分组（缩进一级）。 */
-function renderGroup(group: Group, host: HTMLElement): void {
+/** 深度优先：分组行 → 组内任务（含子任务） → 子分组（缩进一级）。 */
+function renderGroup(
+  group: Group,
+  host: HTMLElement,
+  childrenByParent: Map<number, Task[]>,
+): void {
   const key = groupKey(group);
   const collapsed = state.collapsedGroups.has(key);
   const { done, total } = countGroup(group);
@@ -453,19 +502,40 @@ function renderGroup(group: Group, host: HTMLElement): void {
 
   if (collapsed) return;
 
-  for (const task of group.tasks) host.append(renderTaskRow(task));
-  for (const child of group.children) renderGroup(child, host);
+  for (const task of group.tasks) {
+    renderTaskTree(task, childrenByParent.get(task.id) ?? [], host);
+  }
+  for (const child of group.children) renderGroup(child, host, childrenByParent);
 }
 
-function renderTaskRow(task: Task): HTMLTableRowElement {
+interface TaskRowOptions {
+  isChild: boolean;
+  childCount: number;
+}
+
+/** 父任务 + 默认展开的子任务 + 内联新增行。 */
+function renderTaskTree(task: Task, children: readonly Task[], host: HTMLElement): void {
+  host.append(renderTaskRow(task, { isChild: false, childCount: children.length }));
+
+  if (!state.collapsedTasks.has(task.id)) {
+    for (const child of children) {
+      host.append(renderTaskRow(child, { isChild: true, childCount: 0 }));
+    }
+  }
+
+  if (state.addingSubtaskFor === task.id) host.append(renderSubtaskAddRow(task));
+}
+
+function renderTaskRow(task: Task, options: TaskRowOptions): HTMLTableRowElement {
   const row = el("tr", "row-task");
   row.dataset.taskId = String(task.id);
+  if (options.isChild) row.classList.add("row-subtask");
   if (task.status === "done") row.classList.add("is-done");
 
   row.append(
     renderStatusCell(task),
+    renderTitleCell(task, options),
     renderPriorityCell(task),
-    renderTitleCell(task),
     renderNoteCell(task),
     renderActionsCell(task),
   );
@@ -499,13 +569,158 @@ function renderPriorityCell(task: Task): HTMLTableCellElement {
   return cell;
 }
 
-function renderTitleCell(task: Task): HTMLTableCellElement {
+function renderTitleCell(task: Task, options: TaskRowOptions): HTMLTableCellElement {
   const cell = el("td", "cell-title");
   const title = el("span", "task-title", task.title);
   title.title = "双击改名";
   title.addEventListener("dblclick", () => beginRename(cell, task));
-  cell.append(title);
+
+  // 子任务到头了：没有箭头、没有「＋」，只靠缩进表达层级。
+  if (options.isChild) {
+    cell.append(title);
+    return cell;
+  }
+
+  const wrap = el("div", "task-title-row");
+  const collapsed = state.collapsedTasks.has(task.id);
+
+  if (options.childCount > 0) {
+    const caret = el(
+      "button",
+      collapsed ? "group-caret task-caret is-collapsed" : "group-caret task-caret",
+    );
+    caret.type = "button";
+    caret.title = collapsed ? "展开子任务" : "收起子任务";
+    caret.setAttribute("aria-label", caret.title);
+    caret.setAttribute("aria-expanded", String(!collapsed));
+    caret.addEventListener("click", () => toggleTaskCollapsed(task.id));
+    wrap.append(caret);
+  } else {
+    // 没有子任务也留出箭头宽度，标题不会因为有了子任务而左右跳。
+    wrap.append(el("span", "task-caret task-caret-empty"));
+  }
+
+  wrap.append(title);
+
+  const plus = el("button", "subtask-add", "＋");
+  plus.type = "button";
+  plus.title = "添加子任务";
+  plus.setAttribute("aria-label", `给「${task.title}」添加子任务`);
+  plus.addEventListener("click", () => openSubtaskInput(task.id));
+  wrap.append(plus);
+
+  cell.append(wrap);
   return cell;
+}
+
+function toggleTaskCollapsed(id: number): void {
+  if (state.collapsedTasks.has(id)) state.collapsedTasks.delete(id);
+  else state.collapsedTasks.add(id);
+  render();
+}
+
+function openSubtaskInput(parentId: number): void {
+  // 无论是否已经在输入，都作废上一轮输入框的失焦回调。
+  subtaskInputSession += 1;
+  state.collapsedTasks.delete(parentId); // 输入行跟在子任务后面，必须先展开
+
+  if (state.addingSubtaskFor === parentId) {
+    focusSubtaskInput();
+    return;
+  }
+
+  state.addingSubtaskFor = parentId;
+  subtaskDraft = "";
+  render();
+}
+
+/** 父任务行下的内联子任务输入：回车连续添加，Esc 取消，失焦保存非空内容。 */
+function renderSubtaskAddRow(parent: Task): HTMLTableRowElement {
+  const session = subtaskInputSession;
+  const row = el("tr", "row-subtask-add");
+  const cell = el("td");
+  cell.colSpan = 5;
+
+  const input = el("input", "subtask-input");
+  input.value = subtaskDraft;
+  input.placeholder = `给「${parent.title}」添加子任务，回车保存`;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+
+  let settled = false;
+  const finish = (commit: boolean, keepOpen: boolean): void => {
+    if (settled) return;
+    settled = true;
+
+    const title = input.value.trim();
+    state.addingSubtaskFor = keepOpen ? parent.id : null;
+    subtaskDraft = "";
+
+    if (!commit || title === "") {
+      render();
+      return;
+    }
+
+    // 先重绘清空输入框，再发命令；失败会把草稿放回来。
+    render();
+    void submitSubtask(parent, title);
+  };
+
+  input.addEventListener("input", () => {
+    subtaskDraft = input.value;
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true, true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false, false);
+    }
+  });
+  // 失焦保存非空内容，与就地改名同一理由。延后一拍：点另一个「＋」时
+  // blur 先于 click，同步重绘会把按钮换掉、吞掉紧接着的 click。
+  input.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      // `isConnected` 用来区分“用户点了别处”和“重绘把这个输入框换掉了”：
+      // 后者也会触发 blur，但输入框已经不在文档里，不能当成提交。
+      if (settled || !input.isConnected) return;
+      if (session !== subtaskInputSession) return;
+      if (state.addingSubtaskFor !== parent.id) return;
+      finish(true, false);
+    }, 0);
+  });
+
+  cell.append(input);
+  row.append(cell);
+  return row;
+}
+
+function focusSubtaskInput(): void {
+  if (state.addingSubtaskFor === null) return;
+  const input = dom.body.querySelector<HTMLInputElement>(".subtask-input");
+  if (!input) return;
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+async function submitSubtask(parent: Task, title: string): Promise<void> {
+  try {
+    const created = await api.createTask(
+      state.container,
+      { moduleId: null, submoduleId: null },
+      title,
+      parent.id,
+    );
+    await reload();
+    for (const notice of created.notices) showNotice(notice);
+  } catch (error) {
+    // 失败把草稿放回去，别因为一次后端拒绝丢掉刚打的字。
+    state.addingSubtaskFor = parent.id;
+    subtaskDraft = title;
+    render();
+    showNotice(describe(error), "error");
+  }
 }
 
 function renderNoteCell(task: Task): HTMLTableCellElement {
@@ -1122,9 +1337,15 @@ async function deleteTaskFlow(task: Task): Promise<void> {
     const confirmed = await askConfirm({ title: "删除任务？", body, confirmText: "删除" });
     if (!confirmed) return;
 
-    await api.deleteTask(task.id);
+    const outcome = await api.deleteTask(task.id);
+    state.collapsedTasks.delete(task.id);
+    if (state.addingSubtaskFor === task.id) {
+      state.addingSubtaskFor = null;
+      subtaskDraft = "";
+    }
     await reload();
     showNotice("已删除任务");
+    for (const notice of outcome.notices) showNotice(notice);
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -1196,6 +1417,9 @@ async function deleteProjectFlow(project: Project): Promise<void> {
       state.scope = { kind: "project" };
       state.collapsedNodes.clear();
       state.collapsedGroups.clear();
+      state.collapsedTasks.clear();
+      state.addingSubtaskFor = null;
+      subtaskDraft = "";
     }
 
     await reload();
@@ -1211,9 +1435,10 @@ async function createTask(): Promise<void> {
   try {
     // 新任务跟着当前范围走：选模块就进模块，选子模块就进子模块。
     const target = resolveTarget(buildGroups(state.tasks, state.modules), state.scope);
-    await api.createTask(state.container, target, title);
+    const created = await api.createTask(state.container, target, title);
     dom.taskInput.value = "";
     await reload();
+    for (const notice of created.notices) showNotice(notice);
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -1223,20 +1448,46 @@ async function createTask(): Promise<void> {
 // 轻提示
 // ---------------------------------------------------------------------------
 
+interface NoticeItem {
+  message: string;
+  kind: "info" | "error";
+}
+
+const noticeQueue: NoticeItem[] = [];
+let noticeActive = false;
 let noticeTimer: number | undefined;
 
-/** 底部一条会自己消失的提示，不阻塞任何操作。 */
+/**
+ * 底部一条会自己消失的提示，不阻塞任何操作。
+ *
+ * 多条提示按 FIFO 排队，一次只显示一条——auto 级联可能一次带回好几条，
+ * 直接覆盖会让前一条永远看不见。
+ */
 function showNotice(message: string, kind: "info" | "error" = "info"): void {
-  dom.notice.textContent = message;
-  dom.notice.dataset.kind = kind;
+  noticeQueue.push({ message, kind });
+  if (!noticeActive) drainNotices();
+}
+
+function drainNotices(): void {
+  const next = noticeQueue.shift();
+  if (!next) {
+    noticeActive = false;
+    dom.notice.hidden = true;
+    return;
+  }
+
+  noticeActive = true;
+  dom.notice.textContent = next.message;
+  dom.notice.dataset.kind = next.kind;
   dom.notice.hidden = false;
 
   window.clearTimeout(noticeTimer);
   noticeTimer = window.setTimeout(
     () => {
-      dom.notice.hidden = true;
+      noticeActive = false;
+      drainNotices();
     },
-    kind === "error" ? 8000 : 3000,
+    next.kind === "error" ? 8000 : 3000,
   );
 }
 

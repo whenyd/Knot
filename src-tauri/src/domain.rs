@@ -3,7 +3,7 @@
 //! 命令层只做参数解包 + 转发；SQL 不重复表达这里的规则（不用触发器），
 //! 否则同一套规则会有两个实现，必然漂移。
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 /// 左栏最上方那个虚拟项目。它不是 `project` 表里的一行——
@@ -185,6 +185,22 @@ pub struct DeletePlan {
     pub task_count: i64,
 }
 
+/// `create_task` 的返回：任务本体 + 父任务被聚合自动改动时的轻提示。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskCreated {
+    pub task: Task,
+    /// 新建子任务把已完成的父任务推回进行中时，这里会有一条提示。
+    pub notices: Vec<String>,
+}
+
+/// `delete_task` 的返回：删掉子任务后父任务被自动改动时的轻提示。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteOutcome {
+    pub notices: Vec<String>,
+}
+
 /// 任务表的列顺序，读任务的地方只有这一份，避免 `row.get(i)` 的序号漂移。
 const TASK_COLUMNS: &str = "id, project_id, module_id, submodule_id, parent_task_id, \
                             title, status, priority, note, sort_order";
@@ -240,9 +256,7 @@ pub fn list_projects(conn: &Connection) -> Res<Vec<Project>> {
 /// 项目的模块树（模块 + 其子模块）。"待办"没有模块，不调用这个命令。
 pub fn list_modules(conn: &Connection, project_id: i64) -> Res<Vec<Module>> {
     let mut stmt = conn
-        .prepare(
-            "SELECT id, name FROM module WHERE project_id = ?1 ORDER BY sort_order, id",
-        )
+        .prepare("SELECT id, name FROM module WHERE project_id = ?1 ORDER BY sort_order, id")
         .map_err(db_err)?;
     let modules = stmt
         .query_map(params![project_id], |row| {
@@ -280,9 +294,8 @@ pub fn list_modules(conn: &Connection, project_id: i64) -> Res<Vec<Module>> {
 
 /// 某个容器里的全部任务（含子任务；分组与排序在前端做）。
 pub fn list_tasks(conn: &Connection, container: Container) -> Res<Vec<Task>> {
-    let sql = format!(
-        "SELECT {TASK_COLUMNS} FROM task WHERE project_id IS ?1 ORDER BY sort_order, id"
-    );
+    let sql =
+        format!("SELECT {TASK_COLUMNS} FROM task WHERE project_id IS ?1 ORDER BY sort_order, id");
     let mut stmt = conn.prepare(&sql).map_err(db_err)?;
     let rows = stmt
         .query_map(params![container.project_id()], map_task)
@@ -320,12 +333,7 @@ pub fn create_project(conn: &Connection, name: &str) -> Res<Project> {
 pub fn create_module(conn: &Connection, project_id: i64, name: &str) -> Res<Module> {
     let name = require_name(name, "模块名")?;
     require_project(conn, project_id)?;
-    let sort_order = next_sort_order(
-        conn,
-        "module",
-        "project_id = ?1",
-        params![project_id],
-    )?;
+    let sort_order = next_sort_order(conn, "module", "project_id = ?1", params![project_id])?;
 
     conn.execute(
         "INSERT INTO module (project_id, name, sort_order) VALUES (?1, ?2, ?3)",
@@ -373,35 +381,71 @@ pub fn rename_submodule(conn: &Connection, id: i64, name: &str) -> Res<Submodule
     load_submodule(conn, id)
 }
 
-/// 新建顶层任务。
+/// 新建任务。`parent_task_id` 为 `Some` 时新建一层子任务。
 ///
-/// 归属规则：容器给项目，`module_id`/`submodule_id` 由调用方按"当前范围"给出，
+/// 顶层归属规则：容器给项目，`module_id`/`submodule_id` 由调用方按"当前范围"给出，
 /// 不给就是"未分类"。优先级默认"中"，排序号取**同一组内**最大值 + 1（排在组内最后）。
+///
+/// 子任务的归属真相在父任务上：容器必须与父任务一致，`module_id`/`submodule_id`
+/// 一律落 NULL（调用方传了也忽略）；排序号按父任务下的子任务单独排队。
+/// 只允许一层——父任务自己已经是子任务时拒绝。
 pub fn create_task(
     conn: &Connection,
     container: Container,
     module_id: Option<i64>,
     submodule_id: Option<i64>,
+    parent_task_id: Option<i64>,
     title: &str,
-) -> Res<Task> {
+) -> Res<TaskCreated> {
     let title = require_name(title, "任务文字")?;
-    let project_id = require_task_target(conn, container, module_id, submodule_id)?;
 
-    let sort_order = next_sort_order(
-        conn,
-        "task",
-        "project_id IS ?1 AND module_id IS ?2 AND submodule_id IS ?3 \
-         AND parent_task_id IS NULL",
-        params![project_id, module_id, submodule_id],
-    )?;
+    // 先把父任务校验完再开事务：校验失败时没有半截事务，读起来也更直接。
+    let parent_project = match parent_task_id {
+        None => None,
+        Some(parent_id) => {
+            let parent = load_task(conn, parent_id)?;
+            if parent.parent_task_id.is_some() {
+                return Err("子任务不能再挂子任务".to_string());
+            }
+            if parent.project_id != container.project_id() {
+                return Err("子任务必须与父任务在同一个容器".to_string());
+            }
+            Some(parent.project_id)
+        }
+    };
 
-    conn.execute(
-        "INSERT INTO task (project_id, module_id, submodule_id, title, status, priority, sort_order) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+
+    let (project_id, module_id, submodule_id) = match parent_project {
+        None => (
+            require_task_target(&tx, container, module_id, submodule_id)?,
+            module_id,
+            submodule_id,
+        ),
+        // 子任务不写两级分类：归属由父任务表达，冗余一份只会漂移。
+        Some(project_id) => (project_id, None, None),
+    };
+
+    let sort_order = match parent_task_id {
+        None => next_sort_order(
+            &tx,
+            "task",
+            "project_id IS ?1 AND module_id IS ?2 AND submodule_id IS ?3 \
+             AND parent_task_id IS NULL",
+            params![project_id, module_id, submodule_id],
+        )?,
+        Some(parent_id) => next_sort_order(&tx, "task", "parent_task_id = ?1", params![parent_id])?,
+    };
+
+    tx.execute(
+        "INSERT INTO task (project_id, module_id, submodule_id, parent_task_id, \
+                           title, status, priority, sort_order) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             project_id,
             module_id,
             submodule_id,
+            parent_task_id,
             title,
             // 默认值由领域层写出来，不靠 schema 的 DEFAULT：规则只有一处真相。
             Status::Todo.as_str(),
@@ -411,18 +455,30 @@ pub fn create_task(
     )
     .map_err(db_err)?;
 
-    Ok(Task {
-        id: conn.last_insert_rowid(),
+    let task = Task {
+        id: tx.last_insert_rowid(),
         project_id,
         module_id,
         submodule_id,
-        parent_task_id: None,
+        parent_task_id,
         title: title.to_string(),
         status: Status::Todo,
         priority: Priority::Mid,
         note: String::new(),
         sort_order,
-    })
+    };
+
+    // 新建子任务也是一个聚合事件：已完成的父任务要退回进行中。
+    let mut notices = Vec::new();
+    if let Some(parent_id) = parent_task_id
+        && let Some(change) = aggregate_parent_status(&tx, parent_id)?
+    {
+        notices.push(change.notice);
+    }
+
+    tx.commit().map_err(db_err)?;
+
+    Ok(TaskCreated { task, notices })
 }
 
 /// 就地改名。trim 后为空就拒绝——前端会先把原文还原，库里一个字节也不动。
@@ -459,11 +515,8 @@ pub fn set_priority(conn: &Connection, id: i64, priority: Priority) -> Res<Task>
 pub fn set_note(conn: &Connection, id: i64, note: &str) -> Res<Task> {
     let mut task = load_task(conn, id)?;
 
-    conn.execute(
-        "UPDATE task SET note = ?1 WHERE id = ?2",
-        params![note, id],
-    )
-    .map_err(db_err)?;
+    conn.execute("UPDATE task SET note = ?1 WHERE id = ?2", params![note, id])
+        .map_err(db_err)?;
 
     task.note = note.to_string();
     Ok(task)
@@ -560,8 +613,9 @@ pub fn plan_set_status(conn: &Connection, id: i64, status: Status) -> Res<Status
 
 /// 改状态的第二步：写库。`cascade` 为真时连同未完成子任务一起标为已完成。
 ///
-/// 父任务被“聚合规则”自动推导（子任务全完成 → 父完成）不在本命令里，
-/// 那是子任务状态变化时的事，走另一条路径。
+/// 如果目标本身是子任务，写完后触发父任务聚合（子全完成 → 父完成，
+/// 否则父若是 done → 父退回 doing）。目标是父任务时（包括 cascade 写子任务）
+/// 不向上聚合；手动改父任务永远不动子任务。
 pub fn apply_set_status(
     conn: &Connection,
     id: i64,
@@ -569,10 +623,12 @@ pub fn apply_set_status(
     cascade: bool,
 ) -> Res<StatusOutcome> {
     let mut task = load_task(conn, id)?;
+    let parent_id = task.parent_task_id;
     let tx = conn.unchecked_transaction().map_err(db_err)?;
 
     write_status(&tx, &mut task, status)?;
     let mut changed = vec![task];
+    let mut notices = Vec::new();
 
     if cascade && status == Status::Done {
         for mut child in unfinished_children(&tx, id)? {
@@ -581,13 +637,17 @@ pub fn apply_set_status(
         }
     }
 
+    // 只有目标本身是子任务才聚合；父任务的手动改动不产生提示。
+    if let Some(parent_id) = parent_id
+        && let Some(change) = aggregate_parent_status(&tx, parent_id)?
+    {
+        changed.push(change.task);
+        notices.push(change.notice);
+    }
+
     tx.commit().map_err(db_err)?;
 
-    Ok(StatusOutcome {
-        changed,
-        // “父任务被自动改动才提示”还没到：本切片还没有能把父任务带动的路径。
-        notices: Vec::new(),
-    })
+    Ok(StatusOutcome { changed, notices })
 }
 
 // ---------------------------------------------------------------------------
@@ -614,14 +674,30 @@ pub fn plan_delete_task(conn: &Connection, id: i64) -> Res<DeletePlan> {
     Ok(DeletePlan { task_count })
 }
 
-pub fn delete_task(conn: &Connection, id: i64) -> Res<()> {
-    let removed = conn
+/// 删除任务。删除与父任务聚合在同一个事务里：删掉最后一个子任务会让父任务
+/// 按聚合规则变成已完成，并带回一条轻提示。删父任务只向下级联，不向上聚合。
+pub fn delete_task(conn: &Connection, id: i64) -> Res<DeleteOutcome> {
+    // 先记住归属：DELETE 之后父 id 就查不到了。
+    let task = load_task(conn, id)?;
+    let parent_id = task.parent_task_id;
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+
+    let removed = tx
         .execute("DELETE FROM task WHERE id = ?1", params![id])
         .map_err(db_err)?;
     if removed == 0 {
         return Err(format!("任务 {id} 不存在"));
     }
-    Ok(())
+
+    let mut notices = Vec::new();
+    if let Some(parent_id) = parent_id
+        && let Some(change) = aggregate_parent_status(&tx, parent_id)?
+    {
+        notices.push(change.notice);
+    }
+
+    tx.commit().map_err(db_err)?;
+    Ok(DeleteOutcome { notices })
 }
 
 /// 删除模块 / 子模块的第一步：只数会删掉几条，不写库。
@@ -742,6 +818,64 @@ fn unfinished_children(conn: &Connection, parent_id: i64) -> Res<Vec<Task>> {
         out.push(row.map_err(db_err)?.into_task()?);
     }
     Ok(out)
+}
+
+/// 某个父任务下的全部子任务（一层，不递归）。
+fn load_children(conn: &Connection, parent_id: i64) -> Res<Vec<Task>> {
+    let sql = format!(
+        "SELECT {TASK_COLUMNS} FROM task WHERE parent_task_id = ?1 ORDER BY sort_order, id"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+    let rows = stmt
+        .query_map(params![parent_id], map_task)
+        .map_err(db_err)?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(db_err)?.into_task()?);
+    }
+    Ok(out)
+}
+
+/// 父任务被聚合自动改动时的结果：改完的任务 + 给用户看的一句话。
+struct ParentChange {
+    task: Task,
+    notice: String,
+}
+
+/// 事件触发的父状态推导，只在父状态**真的被改写**时返回 `Some`。
+///
+/// 规则按字面实现：子任务全为 `done` → 父置 `done`；否则且父当前为 `done`
+/// → 父置 `doing`；其余情况不动。零个子任务时 `all()` 为真，所以删除最后一个
+/// 未完成子任务也会把父任务推到已完成——这是规格明确的推导结果，不是不变式。
+fn aggregate_parent_status(conn: &Connection, parent_id: i64) -> Res<Option<ParentChange>> {
+    let mut parent = load_task(conn, parent_id)?;
+    let children = load_children(conn, parent_id)?;
+    let all_done = children.iter().all(|child| child.status == Status::Done);
+
+    let next = if all_done {
+        if parent.status == Status::Done {
+            return Ok(None);
+        }
+        Status::Done
+    } else {
+        if parent.status != Status::Done {
+            return Ok(None);
+        }
+        Status::Doing
+    };
+
+    write_status(conn, &mut parent, next)?;
+    let notice = match next {
+        Status::Done => format!("父任务「{}」已自动标记为已完成", parent.title),
+        Status::Doing => format!("父任务「{}」已恢复为进行中", parent.title),
+        Status::Todo => unreachable!("聚合只会写 done / doing"),
+    };
+
+    Ok(Some(ParentChange {
+        task: parent,
+        notice,
+    }))
 }
 /// 行 → 任务。`status`/`priority` 是文本列，解析失败要在这一层炸出来。
 struct TaskRow {
@@ -1010,9 +1144,7 @@ fn next_sort_order(
     where_clause: &str,
     args: impl rusqlite::Params,
 ) -> Res<i64> {
-    let sql = format!(
-        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM {table} WHERE {where_clause}"
-    );
+    let sql = format!("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM {table} WHERE {where_clause}");
     conn.query_row(&sql, args, |row| row.get(0)).map_err(db_err)
 }
 
@@ -1044,9 +1176,11 @@ mod tests {
             Container::Project { id: project_id },
             None,
             None,
+            None,
             "处理并发刷新",
         )
-        .unwrap();
+        .unwrap()
+        .task;
 
         assert_eq!(task.project_id, Some(project_id));
         assert_eq!(task.module_id, None, "新任务默认落在未分类");
@@ -1065,7 +1199,15 @@ mod tests {
     fn todo_tasks_stay_out_of_projects() {
         let conn = conn();
         let project = create_project(&conn, "支付网关").unwrap();
-        create_task(&conn, Container::Todo, None, None, "看一下 CI 偶发失败").unwrap();
+        create_task(
+            &conn,
+            Container::Todo,
+            None,
+            None,
+            None,
+            "看一下 CI 偶发失败",
+        )
+        .unwrap();
 
         let projects = list_projects(&conn).unwrap();
         assert!(projects[0].is_todo, "首项恒为「待办」");
@@ -1085,20 +1227,29 @@ mod tests {
     fn sort_order_appends_within_group() {
         let conn = conn();
         let project = create_project(&conn, "文档站").unwrap();
-        let container = Container::Project { id: project.id.unwrap() };
+        let container = Container::Project {
+            id: project.id.unwrap(),
+        };
 
         assert_eq!(
-            create_task(&conn, container, None, None, "a").unwrap().sort_order,
+            create_task(&conn, container, None, None, None, "a")
+                .unwrap()
+                .task
+                .sort_order,
             0
         );
         assert_eq!(
-            create_task(&conn, container, None, None, "b").unwrap().sort_order,
+            create_task(&conn, container, None, None, None, "b")
+                .unwrap()
+                .task
+                .sort_order,
             1
         );
         // 不同容器各排各的
         assert_eq!(
-            create_task(&conn, Container::Todo, None, None, "c")
+            create_task(&conn, Container::Todo, None, None, None, "c")
                 .unwrap()
+                .task
                 .sort_order,
             0
         );
@@ -1109,7 +1260,7 @@ mod tests {
     fn rejects_blank_names() {
         let conn = conn();
         assert!(create_project(&conn, "   ").is_err());
-        assert!(create_task(&conn, Container::Todo, None, None, "\t\n").is_err());
+        assert!(create_task(&conn, Container::Todo, None, None, None, "\t\n").is_err());
     }
 
     /// 名字两侧空白被 trim，落到库里的是干净值。
@@ -1124,7 +1275,7 @@ mod tests {
     #[test]
     fn rejects_unknown_project() {
         let conn = conn();
-        assert!(create_task(&conn, Container::Project { id: 999 }, None, None, "x").is_err());
+        assert!(create_task(&conn, Container::Project { id: 999 }, None, None, None, "x").is_err());
         assert!(create_module(&conn, 999, "m").is_err());
     }
 
@@ -1179,9 +1330,11 @@ mod tests {
             Container::Project { id: project_id },
             Some(module.id),
             None,
+            None,
             "登录限流",
         )
-        .unwrap();
+        .unwrap()
+        .task;
 
         assert_eq!(task.module_id, Some(module.id));
         assert_eq!(task.submodule_id, None, "只选模块时落在模块的直接列表");
@@ -1200,9 +1353,11 @@ mod tests {
             Container::Project { id: project_id },
             Some(module.id),
             Some(submodule),
+            None,
             "补过期用例",
         )
-        .unwrap();
+        .unwrap()
+        .task;
 
         assert_eq!(task.module_id, Some(module.id));
         assert_eq!(task.submodule_id, Some(submodule));
@@ -1218,22 +1373,32 @@ mod tests {
         let module = create_module(&conn, project_id, "认证").unwrap();
 
         assert_eq!(
-            create_task(&conn, container, None, None, "未分类的")
+            create_task(&conn, container, None, None, None, "未分类的")
                 .unwrap()
+                .task
                 .sort_order,
             0
         );
         assert_eq!(
-            create_task(&conn, container, Some(module.id), None, "模块里的")
+            create_task(&conn, container, Some(module.id), None, None, "模块里的")
                 .unwrap()
+                .task
                 .sort_order,
             0,
             "另一个组从头数起"
         );
         assert_eq!(
-            create_task(&conn, container, Some(module.id), None, "模块里的第二条")
-                .unwrap()
-                .sort_order,
+            create_task(
+                &conn,
+                container,
+                Some(module.id),
+                None,
+                None,
+                "模块里的第二条"
+            )
+            .unwrap()
+            .task
+            .sort_order,
             1
         );
     }
@@ -1246,7 +1411,17 @@ mod tests {
         let b = create_project(&conn, "B").unwrap().id.unwrap();
         let module = create_module(&conn, a, "认证").unwrap();
 
-        assert!(create_task(&conn, Container::Project { id: b }, Some(module.id), None, "x").is_err());
+        assert!(
+            create_task(
+                &conn,
+                Container::Project { id: b },
+                Some(module.id),
+                None,
+                None,
+                "x"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1257,14 +1432,17 @@ mod tests {
         let billing = create_module(&conn, project_id, "计费").unwrap();
         let submodule = seed_submodule(&conn, auth.id, "token 刷新");
 
-        assert!(create_task(
-            &conn,
-            Container::Project { id: project_id },
-            Some(billing.id),
-            Some(submodule),
-            "x"
-        )
-        .is_err());
+        assert!(
+            create_task(
+                &conn,
+                Container::Project { id: project_id },
+                Some(billing.id),
+                Some(submodule),
+                None,
+                "x"
+            )
+            .is_err()
+        );
     }
 
     /// 「待办」没有模块，带模块归属是调用方的错，不是默默把它当未分类。
@@ -1274,7 +1452,7 @@ mod tests {
         let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
 
-        assert!(create_task(&conn, Container::Todo, Some(module.id), None, "x").is_err());
+        assert!(create_task(&conn, Container::Todo, Some(module.id), None, None, "x").is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -1294,7 +1472,11 @@ mod tests {
         let modules = list_modules(&conn, project_id).unwrap();
         let auth_now = modules.iter().find(|m| m.id == auth.id).unwrap();
         assert_eq!(
-            auth_now.submodules.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            auth_now
+                .submodules
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["token 刷新", "登录限流"]
         );
         assert_eq!(auth_now.submodules[0].id, first.id);
@@ -1363,7 +1545,10 @@ mod tests {
 
         assert_eq!(load_project(&conn, project_id).unwrap().name, "todolist-tr");
         assert_eq!(load_module(&conn, module.id).unwrap().name, "认证");
-        assert_eq!(load_submodule(&conn, submodule.id).unwrap().name, "token 刷新");
+        assert_eq!(
+            load_submodule(&conn, submodule.id).unwrap().name,
+            "token 刷新"
+        );
     }
 
     #[test]
@@ -1385,9 +1570,11 @@ mod tests {
             Container::Project { id: project_id },
             Some(module.id),
             None,
+            None,
             "登录限流",
         )
-        .unwrap();
+        .unwrap()
+        .task;
 
         rename_project(&conn, project_id, "todolist").unwrap();
         rename_module(&conn, module.id, "鉴权").unwrap();
@@ -1405,21 +1592,24 @@ mod tests {
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = seed_submodule(&conn, module.id, "token 刷新");
 
-        assert!(create_task(
-            &conn,
-            Container::Project { id: project_id },
-            None,
-            Some(submodule),
-            "x"
-        )
-        .is_err());
+        assert!(
+            create_task(
+                &conn,
+                Container::Project { id: project_id },
+                None,
+                Some(submodule),
+                None,
+                "x"
+            )
+            .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
     // 可编辑三件套
     // -----------------------------------------------------------------------
 
-    /// 直接往库里塞一条子任务——本切片还没有建子任务的命令，但规则已经在这里。
+    /// 直接往库里塞一条子任务：测试需要任意初始状态时用，正常路径走 `create_child`。
     fn insert_child(conn: &Connection, parent: &Task, title: &str, status: Status) -> i64 {
         conn.execute(
             "INSERT INTO task (project_id, parent_task_id, title, status, priority) \
@@ -1430,9 +1620,31 @@ mod tests {
         conn.last_insert_rowid()
     }
 
+    fn container_of(task: &Task) -> Container {
+        match task.project_id {
+            None => Container::Todo,
+            Some(id) => Container::Project { id },
+        }
+    }
+
+    /// 走正式命令建一层子任务（父任务默认 `todo`）。
+    fn create_child(conn: &Connection, parent: &Task, title: &str) -> TaskCreated {
+        create_task(
+            conn,
+            container_of(parent),
+            None,
+            None,
+            Some(parent.id),
+            title,
+        )
+        .unwrap()
+    }
+
     fn seed_task(conn: &Connection) -> Task {
         let container = Container::Todo;
-        create_task(conn, container, None, None, "实现 token 轮换").unwrap()
+        create_task(conn, container, None, None, None, "实现 token 轮换")
+            .unwrap()
+            .task
     }
 
     #[test]
@@ -1568,6 +1780,270 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // 子任务（一层）与父状态聚合
+    // -----------------------------------------------------------------------
+
+    /// 子任务继承父任务的项目，两级分类恒为 NULL（传了也忽略）。
+    #[test]
+    fn subtask_inherits_project_and_nulls_classification() {
+        let conn = conn();
+        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let container = Container::Project { id: project_id };
+        let module = create_module(&conn, project_id, "认证").unwrap();
+        let parent = create_task(&conn, container, Some(module.id), None, None, "父任务")
+            .unwrap()
+            .task;
+
+        let created = create_task(
+            &conn,
+            container,
+            Some(module.id),
+            None,
+            Some(parent.id),
+            "子任务",
+        )
+        .unwrap();
+        let child = created.task;
+
+        assert_eq!(child.parent_task_id, Some(parent.id));
+        assert_eq!(child.project_id, Some(project_id), "跟随父任务的项目");
+        assert_eq!(child.module_id, None, "归属真相在父任务，不冗余分类");
+        assert_eq!(child.submodule_id, None);
+        assert_eq!(child.status.as_str(), "todo");
+        assert_eq!(child.priority.as_str(), "mid");
+        assert!(created.notices.is_empty(), "父任务本来就是未完成");
+    }
+
+    #[test]
+    fn subtask_in_todo_inherits_null_project() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let child = create_child(&conn, &parent, "子任务").task;
+
+        assert_eq!(child.project_id, None);
+        assert_eq!(child.module_id, None);
+        assert_eq!(child.submodule_id, None);
+        assert_eq!(child.parent_task_id, Some(parent.id));
+    }
+
+    /// 只允许一层：子任务不能再挂子任务。
+    #[test]
+    fn subtask_rejects_grandchild() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let child = create_child(&conn, &parent, "子任务").task;
+
+        let error =
+            create_task(&conn, Container::Todo, None, None, Some(child.id), "孙任务").unwrap_err();
+        assert!(error.contains("子任务不能再挂子任务"), "{error}");
+        assert_eq!(list_tasks(&conn, Container::Todo).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn subtask_rejects_unknown_parent() {
+        let conn = conn();
+        let error =
+            create_task(&conn, Container::Todo, None, None, Some(999), "子任务").unwrap_err();
+        assert!(error.contains("不存在"), "{error}");
+        assert!(list_tasks(&conn, Container::Todo).unwrap().is_empty());
+    }
+
+    #[test]
+    fn subtask_rejects_parent_in_another_container() {
+        let conn = conn();
+        let a = create_project(&conn, "A").unwrap().id.unwrap();
+        let b = create_project(&conn, "B").unwrap().id.unwrap();
+        let parent = create_task(
+            &conn,
+            Container::Project { id: a },
+            None,
+            None,
+            None,
+            "父任务",
+        )
+        .unwrap()
+        .task;
+
+        let error = create_task(
+            &conn,
+            Container::Project { id: b },
+            None,
+            None,
+            Some(parent.id),
+            "子任务",
+        )
+        .unwrap_err();
+        assert!(error.contains("同一个容器"), "{error}");
+        assert_eq!(
+            list_tasks(&conn, Container::Project { id: b })
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    /// 排序号按父任务各自排队，不会和顶层任务或其他父任务的子任务混在一起。
+    #[test]
+    fn subtask_sort_order_is_per_parent() {
+        let conn = conn();
+        let first = create_task(&conn, Container::Todo, None, None, None, "父一")
+            .unwrap()
+            .task;
+        let second = create_task(&conn, Container::Todo, None, None, None, "父二")
+            .unwrap()
+            .task;
+
+        assert_eq!(create_child(&conn, &first, "a").task.sort_order, 0);
+        assert_eq!(create_child(&conn, &first, "b").task.sort_order, 1);
+        assert_eq!(create_child(&conn, &second, "c").task.sort_order, 0);
+    }
+
+    /// 事件触发 1：在已完成的父任务下新增未完成子任务 → 父退回进行中。
+    #[test]
+    fn creating_subtask_on_done_parent_reopens_it_with_notice() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        apply_set_status(&conn, parent.id, Status::Done, false).unwrap();
+
+        let created = create_child(&conn, &parent, "新子任务");
+
+        assert_eq!(created.notices.len(), 1);
+        assert!(
+            created.notices[0].contains("恢复为进行中"),
+            "{:?}",
+            created.notices
+        );
+        assert_eq!(created.task.status.as_str(), "todo");
+        assert_eq!(
+            load_task(&conn, parent.id).unwrap().status.as_str(),
+            "doing"
+        );
+    }
+
+    #[test]
+    fn creating_subtask_on_open_parent_changes_nothing() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+
+        let created = create_child(&conn, &parent, "子任务");
+
+        assert!(created.notices.is_empty());
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
+    }
+
+    /// 事件触发 2：最后一个未完成子任务完成 → 父完成 + 轻提示。
+    #[test]
+    fn last_child_done_completes_parent_with_notice() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let first = create_child(&conn, &parent, "子任务一").task;
+        let second = create_child(&conn, &parent, "子任务二").task;
+
+        let outcome = apply_set_status(&conn, first.id, Status::Done, false).unwrap();
+        assert!(outcome.notices.is_empty(), "还有未完成子任务，父不动");
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
+
+        let outcome = apply_set_status(&conn, second.id, Status::Done, false).unwrap();
+        assert_eq!(outcome.notices.len(), 1);
+        assert!(
+            outcome.notices[0].contains("已完成"),
+            "{:?}",
+            outcome.notices
+        );
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
+        let aggregated = outcome.changed.last().expect("自动改动的父任务也要带回");
+        assert_eq!(aggregated.id, parent.id);
+        assert_eq!(aggregated.status.as_str(), "done");
+    }
+
+    #[test]
+    fn non_last_child_done_leaves_parent_alone() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let first = create_child(&conn, &parent, "子任务一").task;
+        create_child(&conn, &parent, "子任务二");
+
+        let outcome = apply_set_status(&conn, first.id, Status::Done, false).unwrap();
+
+        assert!(outcome.notices.is_empty());
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
+    }
+
+    /// 子任务退回：父若已完成 → 退回进行中；其他子任务不动。
+    #[test]
+    fn child_revert_reopens_done_parent_with_notice() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let first = create_child(&conn, &parent, "子任务一").task;
+        let second = create_child(&conn, &parent, "子任务二").task;
+        apply_set_status(&conn, first.id, Status::Done, false).unwrap();
+        apply_set_status(&conn, second.id, Status::Done, false).unwrap();
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
+
+        let outcome = apply_set_status(&conn, first.id, Status::Todo, false).unwrap();
+
+        assert_eq!(outcome.notices.len(), 1);
+        assert!(
+            outcome.notices[0].contains("恢复为进行中"),
+            "{:?}",
+            outcome.notices
+        );
+        assert_eq!(
+            load_task(&conn, parent.id).unwrap().status.as_str(),
+            "doing"
+        );
+        assert_eq!(load_task(&conn, second.id).unwrap().status.as_str(), "done");
+    }
+
+    #[test]
+    fn child_revert_with_unfinished_sibling_does_not_touch_parent() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let first = create_child(&conn, &parent, "子任务一").task;
+        create_child(&conn, &parent, "子任务二");
+        apply_set_status(&conn, first.id, Status::Done, false).unwrap();
+
+        let outcome = apply_set_status(&conn, first.id, Status::Doing, false).unwrap();
+
+        assert!(outcome.notices.is_empty());
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
+    }
+
+    /// 手动退回父任务：子任务不动，也不产生提示。
+    #[test]
+    fn manual_parent_revert_leaves_children_and_has_no_notice() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let first = create_child(&conn, &parent, "子任务一").task;
+        let second = create_child(&conn, &parent, "子任务二").task;
+        apply_set_status(&conn, first.id, Status::Done, false).unwrap();
+        apply_set_status(&conn, second.id, Status::Done, false).unwrap();
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
+
+        let outcome = apply_set_status(&conn, parent.id, Status::Todo, false).unwrap();
+
+        assert!(outcome.notices.is_empty(), "用户自己点的这一下不产生提示");
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
+        assert_eq!(load_task(&conn, first.id).unwrap().status.as_str(), "done");
+        assert_eq!(load_task(&conn, second.id).unwrap().status.as_str(), "done");
+    }
+
+    /// 聚合是字面规则：没有子任务时 `all()` 为真，父任务会被推到已完成。
+    #[test]
+    fn aggregating_empty_child_set_marks_parent_done() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+
+        let change = aggregate_parent_status(&conn, parent.id)
+            .unwrap()
+            .expect("空子任务集合应触发聚合");
+
+        assert_eq!(change.task.status.as_str(), "done");
+        assert!(change.notice.contains("已完成"), "{}", change.notice);
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
+    }
+
+    // -----------------------------------------------------------------------
     // 删除
     // -----------------------------------------------------------------------
 
@@ -1583,10 +2059,59 @@ mod tests {
         assert_eq!(plan.task_count, 3, "父任务 + 两个子任务");
         assert_eq!(load_task(&conn, task.id).unwrap().title, "实现 token 轮换");
 
-        delete_task(&conn, task.id).unwrap();
+        let outcome = delete_task(&conn, task.id).unwrap();
+        assert!(outcome.notices.is_empty(), "删父任务只向下级联，不向上聚合");
         assert!(load_task(&conn, task.id).is_err());
         assert!(load_task(&conn, open).is_err());
         assert!(load_task(&conn, done).is_err());
+    }
+
+    /// 事件触发 3：删掉最后一个未完成子任务 → 父任务完成 + 轻提示。
+    #[test]
+    fn deleting_last_unfinished_child_completes_parent_with_notice() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let child = create_child(&conn, &parent, "子任务").task;
+
+        let outcome = delete_task(&conn, child.id).unwrap();
+
+        assert_eq!(outcome.notices.len(), 1);
+        assert!(
+            outcome.notices[0].contains("已完成"),
+            "{:?}",
+            outcome.notices
+        );
+        assert!(load_task(&conn, child.id).is_err());
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
+    }
+
+    #[test]
+    fn deleting_child_with_unfinished_sibling_does_not_touch_parent() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let first = create_child(&conn, &parent, "子任务一").task;
+        let second = create_child(&conn, &parent, "子任务二").task;
+
+        let outcome = delete_task(&conn, first.id).unwrap();
+
+        assert!(outcome.notices.is_empty());
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
+        assert_eq!(load_task(&conn, second.id).unwrap().status.as_str(), "todo");
+    }
+
+    /// 父任务已经完成时删掉已完成的子任务：状态不变，不重复提示。
+    #[test]
+    fn deleting_done_child_from_done_parent_emits_no_notice() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let child = create_child(&conn, &parent, "子任务").task;
+        apply_set_status(&conn, child.id, Status::Done, false).unwrap();
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
+
+        let outcome = delete_task(&conn, child.id).unwrap();
+
+        assert!(outcome.notices.is_empty());
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
     }
 
     /// 删模块：子模块、模块里的任务、子模块里的任务及其子任务一起消失，
@@ -1599,30 +2124,46 @@ mod tests {
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
 
-        let in_module = create_task(&conn, container, Some(module.id), None, "登录限流").unwrap();
+        let in_module = create_task(&conn, container, Some(module.id), None, None, "登录限流")
+            .unwrap()
+            .task;
         let in_submodule = create_task(
             &conn,
             container,
             Some(module.id),
             Some(submodule.id),
+            None,
             "补过期用例",
         )
-        .unwrap();
+        .unwrap()
+        .task;
         let child = insert_child(&conn, &in_submodule, "先写失败用例", Status::Todo);
-        let outside = create_task(&conn, container, None, None, "整理文档").unwrap();
+        let outside = create_task(&conn, container, None, None, None, "整理文档")
+            .unwrap()
+            .task;
 
         let plan = plan_delete_node(&conn, NodeKind::Module, module.id).unwrap();
         assert_eq!(plan.task_count, 3, "模块任务 + 子模块任务 + 子任务");
-        assert_eq!(list_tasks(&conn, container).unwrap().len(), 4, "plan 不写库");
+        assert_eq!(
+            list_tasks(&conn, container).unwrap().len(),
+            4,
+            "plan 不写库"
+        );
 
         delete_node(&conn, NodeKind::Module, module.id).unwrap();
 
         let remaining = list_tasks(&conn, container).unwrap();
         assert_eq!(
-            remaining.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
+            remaining
+                .iter()
+                .map(|t| t.title.as_str())
+                .collect::<Vec<_>>(),
             vec!["整理文档"]
         );
-        assert!(list_modules(&conn, project_id).unwrap().is_empty(), "子模块随模块删除");
+        assert!(
+            list_modules(&conn, project_id).unwrap().is_empty(),
+            "子模块随模块删除"
+        );
         assert!(load_task(&conn, in_module.id).is_err());
         assert!(load_task(&conn, in_submodule.id).is_err());
         assert!(load_task(&conn, child).is_err());
@@ -1638,15 +2179,19 @@ mod tests {
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
 
-        let in_module = create_task(&conn, container, Some(module.id), None, "登录限流").unwrap();
+        let in_module = create_task(&conn, container, Some(module.id), None, None, "登录限流")
+            .unwrap()
+            .task;
         let in_submodule = create_task(
             &conn,
             container,
             Some(module.id),
             Some(submodule.id),
+            None,
             "补过期用例",
         )
-        .unwrap();
+        .unwrap()
+        .task;
         let child = insert_child(&conn, &in_submodule, "先写失败用例", Status::Todo);
 
         let plan = plan_delete_node(&conn, NodeKind::Submodule, submodule.id).unwrap();
@@ -1673,24 +2218,38 @@ mod tests {
 
         let module = create_module(&conn, doomed, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
-        create_task(&conn, container, Some(module.id), None, "登录限流").unwrap();
+        create_task(&conn, container, Some(module.id), None, None, "登录限流").unwrap();
         let in_submodule = create_task(
             &conn,
             container,
             Some(module.id),
             Some(submodule.id),
+            None,
             "补过期用例",
         )
-        .unwrap();
+        .unwrap()
+        .task;
         insert_child(&conn, &in_submodule, "先写失败用例", Status::Todo);
-        create_task(&conn, container, None, None, "整理文档").unwrap();
+        create_task(&conn, container, None, None, None, "整理文档").unwrap();
 
-        create_task(&conn, Container::Todo, None, None, "待办里的").unwrap();
-        create_task(&conn, Container::Project { id: kept }, None, None, "另一个项目的").unwrap();
+        create_task(&conn, Container::Todo, None, None, None, "待办里的").unwrap();
+        create_task(
+            &conn,
+            Container::Project { id: kept },
+            None,
+            None,
+            None,
+            "另一个项目的",
+        )
+        .unwrap();
 
         let plan = plan_delete_project(&conn, doomed).unwrap();
         assert_eq!(plan.task_count, 4, "含未分类任务与子任务");
-        assert_eq!(list_tasks(&conn, container).unwrap().len(), 4, "plan 不写库");
+        assert_eq!(
+            list_tasks(&conn, container).unwrap().len(),
+            4,
+            "plan 不写库"
+        );
 
         delete_project(&conn, doomed).unwrap();
 
@@ -1769,8 +2328,19 @@ mod tests {
         let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
-        let existing = create_task(&conn, container, Some(module.id), None, "模块里的第一条").unwrap();
-        let task = create_task(&conn, container, None, None, "未分类的").unwrap();
+        let existing = create_task(
+            &conn,
+            container,
+            Some(module.id),
+            None,
+            None,
+            "模块里的第一条",
+        )
+        .unwrap()
+        .task;
+        let task = create_task(&conn, container, None, None, None, "未分类的")
+            .unwrap()
+            .task;
         assert_eq!(task.sort_order, 0, "未分类组从头数起");
         assert_eq!(existing.sort_order, 0);
 
@@ -1803,7 +2373,16 @@ mod tests {
         let b = create_project(&conn, "B").unwrap().id.unwrap();
         let module_b = create_module(&conn, b, "认证").unwrap();
 
-        let parent = create_task(&conn, Container::Project { id: a }, None, None, "父任务").unwrap();
+        let parent = create_task(
+            &conn,
+            Container::Project { id: a },
+            None,
+            None,
+            None,
+            "父任务",
+        )
+        .unwrap()
+        .task;
         let child = insert_child(&conn, &parent, "子任务", Status::Todo);
 
         move_task(
@@ -1838,9 +2417,11 @@ mod tests {
             Container::Project { id: project_id },
             Some(module.id),
             None,
+            None,
             "登录限流",
         )
-        .unwrap();
+        .unwrap()
+        .task;
         let child = insert_child(&conn, &task, "子任务", Status::Todo);
 
         let moved = move_task(
@@ -1876,9 +2457,11 @@ mod tests {
             Container::Project { id: a },
             Some(module_a.id),
             None,
+            None,
             "登录限流",
         )
-        .unwrap();
+        .unwrap()
+        .task;
 
         let attempts = [
             // 跨项目的模块
@@ -1914,23 +2497,28 @@ mod tests {
         ];
 
         for target in attempts {
-            assert!(move_task(&conn, task.id, target).is_err(), "{target:?} 应被拒");
+            assert!(
+                move_task(&conn, task.id, target).is_err(),
+                "{target:?} 应被拒"
+            );
             let after = load_task(&conn, task.id).unwrap();
             assert_eq!(after.project_id, Some(a));
             assert_eq!(after.module_id, Some(module_a.id));
             assert_eq!(after.submodule_id, None);
         }
 
-        assert!(move_task(
-            &conn,
-            999,
-            MoveTarget {
-                container: Container::Todo,
-                module_id: None,
-                submodule_id: None,
-            }
-        )
-        .is_err());
+        assert!(
+            move_task(
+                &conn,
+                999,
+                MoveTarget {
+                    container: Container::Todo,
+                    module_id: None,
+                    submodule_id: None,
+                }
+            )
+            .is_err()
+        );
     }
 
     /// 子任务不能单独移动：归属的真相在父任务上。
@@ -2014,6 +2602,43 @@ mod tests {
     }
 
     #[test]
+    fn task_created_wire_shape_is_camel_case() {
+        let conn = conn();
+        let json = serde_json::to_value(TaskCreated {
+            task: seed_task(&conn),
+            notices: vec!["父任务已更新".to_string()],
+        })
+        .unwrap();
+
+        assert_eq!(json["notices"][0], "父任务已更新");
+        assert!(json["task"].get("parentTaskId").is_some());
+        assert!(
+            json["task"].get("parent_task_id").is_none(),
+            "不能是 snake_case"
+        );
+    }
+
+    #[test]
+    fn delete_outcome_wire_shape_is_camel_case() {
+        let json = serde_json::to_value(DeleteOutcome {
+            notices: vec!["父任务已更新".to_string()],
+        })
+        .unwrap();
+        assert_eq!(json["notices"][0], "父任务已更新");
+    }
+
+    #[test]
+    fn status_outcome_wire_shape_is_camel_case() {
+        let json = serde_json::to_value(StatusOutcome {
+            changed: Vec::new(),
+            notices: Vec::new(),
+        })
+        .unwrap();
+        assert!(json.get("changed").is_some());
+        assert!(json.get("notices").is_some());
+    }
+
+    #[test]
     fn node_kind_arg_deserializes_from_frontend() {
         assert_eq!(
             serde_json::from_str::<NodeKind>(r#""module""#).unwrap(),
@@ -2042,7 +2667,9 @@ mod tests {
             Status::Doing
         );
         assert_eq!(
-            serde_json::from_str::<Priority>(r#""high""#).unwrap().as_str(),
+            serde_json::from_str::<Priority>(r#""high""#)
+                .unwrap()
+                .as_str(),
             "high"
         );
         assert!(serde_json::from_str::<Status>(r#""blocked""#).is_err());

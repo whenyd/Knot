@@ -97,15 +97,17 @@ CREATE INDEX idx_task_parent  ON task(parent_task_id);
 2. 子任务新增
 3. 子任务删除
 
-聚合动作：子任务全为 `done` → 父置 `done`；否则且父当前为 `done` → 父置 `doing`。父任务被自动改动时，返回一条 notice，前端显示几秒后消失的轻提示。
+聚合动作：子任务全为 `done` → 父置 `done`；否则且父当前为 `done` → 父置 `doing`。规则按字面实现：零个子任务时 `all()` 为真，所以删除最后一个未完成子任务会让父任务变 `done`。只有父状态**真的被改写**时才返回一条 notice；前端按 FIFO 排队显示几秒后自动消失的轻提示。手动改父任务（包括 cascade 写子任务）不触发聚合、不产生提示；删父任务只向下级联，不向上聚合。
 
 | 事件 | 父任务 | 子任务 | 用户感知 |
 |---|---|---|---|
 | 手动把父设为 `done`，子任务全完成 | → done | 不动 | 无 |
 | 手动把父设为 `done`，有未完成子任务 | 先确认 → done | 一并 done | 弹窗告知影响条数 |
 | 子任务变 `done` 且是最后一个 | → done | 不动 | 轻提示 |
+| 子任务变 `done` 但还有未完成兄弟 | 不动 | 不动 | 无 |
 | 子任务退回 / 新增未完成子任务 | → doing | 不动 | 轻提示 |
-| 删除最后一个未完成子任务 | → done | 不动 | 轻提示 |
+| 删除最后一个未完成子任务 | → done（零子任务也按全完成算） | 不动 | 轻提示 |
+| 删除子任务但还有未完成兄弟 | 不动 | 不动 | 无 |
 | 手动把父从 `done` 退回 | → 用户选的状态 | **不动** | 无（可能暂时不一致） |
 | 删除父任务 | 删 | 一并删 | 弹窗告知条数 |
 
@@ -120,7 +122,7 @@ list_modules(project_id)              -> [{ id, name, submodules: [...] }]
 list_tasks(container)                 -> [task]   // container = { kind: 'todo' } | { kind: 'project', id }
 
 // 写 · 任务
-create_task({ container, module_id?, submodule_id?, parent_task_id?, title })
+create_task({ container, module_id?, submodule_id?, parent_task_id?, title }) -> { task, notices }
 rename_task(id, title)                              // 就地编辑；trim 后为空则拒绝
 set_note(id, note)
 set_priority(id, priority)
@@ -140,7 +142,7 @@ plan_delete_node(kind, id) -> { task_count } / delete_node(kind, id)   // kind =
 
 // 删除任务
 plan_delete_task(id) -> { task_count }   // 含子任务
-delete_task(id)
+delete_task(id) -> { notices }
 ```
 
 删除的条数一律包含会被级联带走的子任务；`plan_*` 只读，前端拿 `task_count` 填确认框，用户确认后才调 `delete_*`。
@@ -150,6 +152,8 @@ delete_task(id)
 **字段名约定**：跨 IPC 的结构一律 camelCase（Rust 侧 `#[serde(rename_all = "camelCase")]`，枚举值小写），前端类型与之逐字对应。字段名归后端所有，前端不另行映射。`domain.rs` 里有几条单测专门盯着这个契约。
 
 **归属参数归后端校验**：`create_task` 接受 `module_id`/`submodule_id`，由 `domain.rs` 验证「模块属于该项目」「子模块属于该模块」「「待办」的任务不能带模块」。前端只负责把当前范围翻译成这两个 id（`resolveTarget`），不代替后端判定合法性。
+
+**子任务的归属规则**：给了 `parent_task_id` 时，后端拒绝「父任务已有父任务」（只允许一层）与「父任务不在当前容器」；子任务落库时 `module_id`/`submodule_id` 一律为 NULL（调用方传了也忽略），`project_id` 跟随父任务，排序号按该父任务下 `MAX+1` 单独排队。父任务的分类就是子任务的分类，不需要也不允许冗余一份。
 
 **默认值归属**：`status`/`priority` 的默认值由 `domain.rs` 在 INSERT 时显式写出，schema 的 `DEFAULT` 只作兜底。同一条规则不在两处表达，改默认值只有一个地方要动。
 
@@ -164,7 +168,9 @@ delete_task(id)
 - **内联新建项目表单**是弹窗以外唯一的输入形态（左栏「＋ 新建项目」）。它只有一个收场出口 `resetProjectForm()`（隐藏 + 清空）：提交成功、点表单外（`document` 上的 `mousedown`，表单内不关）、Esc 都走它；打开时挂监听、关闭时摘掉，不留常驻监听。已输入的文字跟随表单一起丢弃——不保留草稿，也不计入状态。
 - **菜单只有一份实现**：`src/menu.ts` 负责弹出、定位、关闭，三处共用——左栏项目/范围节点的右键菜单、任务行尾的「…」菜单、优先级的 `.menu` 浮窗。入口只给 `items` 和位置（指针点或元素锚点），菜单项的行为由调用方提供。带 `children` 的条目（目前只有「移动到…」）不内联展开，而是悬停/点击后在父行右侧弹出独立的 `.menu` 子面板；右侧放不下翻到左侧，父面板布局不重排。一次只保留一条面板路径：打开同级子面板会先关掉旧的；根面板滚动会关掉子面板。打开时先关掉上一个；点外面 / Esc / 滚屏 / 窗口失焦关闭；上下键在当前面板内循环，右键进子面板、左键退回父行，Esc 把焦点还给打开它的按钮。锚点定位在下方放不下时翻到上方，并夹在视口内。
 - **删除的回落**：删除任务只是重取当前容器；删除模块/子模块时，如果当前 `scope` 正落在被删的子树里，回到项目「全部」；删除项目时，如果当前 `container` 正是它，回到「待办」。删除前都用 `plan_*` 的条数填确认框，不在前端重算级联范围。
-- **轻提示**：表格底部一条队列，几秒后自动消失，不阻塞任何操作。
+- **子任务渲染**：`buildGroups` 继续跳过 `parentTaskId !== null` 的任务（它们不占分组行，分组计数只算父任务）；渲染时另建 `parentTaskId → tasks` 的索引，父任务行后按同一套排序（优先级 → `sort_order`）渲染缩进子行。父任务行默认展开，`collapsedTasks` 只记本次会话里收起的那几个；父任务标题前的折叠箭头与行内「＋」只出现在顶层任务上。
+- **行内子任务输入**：`addingSubtaskFor` 同时只有一个父任务，输入草稿放在 `subtaskDraft`（状态对象外，重绘不丢）。回车保存并保持输入行打开（可连续添加），Esc 取消，失焦保存非空内容；失焦回调延后一拍并检查 `input.isConnected`，避免重绘换掉输入框时被误当成提交。
+- **轻提示队列**：表格底部一条队列，FIFO 一次显示一条（info 3s / error 8s），几秒后自动消失，不阻塞任何操作。一次操作带回多条提示时不会互相顶掉。
 
 ## 边界情况
 
