@@ -13,6 +13,9 @@ export type Container = { kind: "todo" } | { kind: "project"; id: number };
 export type Status = "todo" | "doing" | "done";
 export type Priority = "high" | "mid" | "low";
 
+/** 可整组删除的分类节点。模块和子模块的 id 各自独立，必须带 kind。 */
+export type NodeKind = "module" | "submodule";
+
 /** 新任务的归属。子模块必项连同它的模块一起给，后端会校验这层父子关系。 */
 export interface ScopeTarget {
   moduleId: number | null;
@@ -67,6 +70,11 @@ export interface StatusOutcome {
   notices: string[];
 }
 
+/** 删除前的告知：这次会删掉多少个任务（含子任务）。 */
+export interface DeletePlan {
+  taskCount: number;
+}
+
 export const api = {
   listProjects: () => invoke<Project[]>("list_projects"),
   createProject: (name: string) => invoke<Project>("create_project", { name }),
@@ -91,4 +99,14 @@ export const api = {
   /** 第二步：写库。`cascade` 为真时连同未完成子任务一起标为已完成。 */
   applySetStatus: (id: number, status: Status, cascade: boolean) =>
     invoke<StatusOutcome>("apply_set_status", { id, status, cascade }),
+  /** 删除任务的第一步：只数会删掉几条（含子任务），不写库。 */
+  planDeleteTask: (id: number) => invoke<DeletePlan>("plan_delete_task", { id }),
+  deleteTask: (id: number) => invoke<void>("delete_task", { id }),
+  /** 删除模块 / 子模块的第一步：只数会删掉几条（含子模块里的任务），不写库。 */
+  planDeleteNode: (kind: NodeKind, id: number) =>
+    invoke<DeletePlan>("plan_delete_node", { kind, id }),
+  deleteNode: (kind: NodeKind, id: number) => invoke<void>("delete_node", { kind, id }),
+  /** 删除项目的第一步：项目里的全部任务都会一起删除。 */
+  planDeleteProject: (id: number) => invoke<DeletePlan>("plan_delete_project", { id }),
+  deleteProject: (id: number) => invoke<void>("delete_project", { id }),
 };

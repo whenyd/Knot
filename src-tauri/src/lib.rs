@@ -33,6 +33,12 @@ pub fn run() {
             commands::set_priority,
             commands::plan_set_status,
             commands::apply_set_status,
+            commands::plan_delete_task,
+            commands::delete_task,
+            commands::plan_delete_node,
+            commands::delete_node,
+            commands::plan_delete_project,
+            commands::delete_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

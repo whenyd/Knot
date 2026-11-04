@@ -5,7 +5,10 @@
 use tauri::State;
 
 use crate::db::Db;
-use crate::domain::{self, Container, Module, Priority, Project, Status, StatusOutcome, StatusPlan, Submodule, Task};
+use crate::domain::{
+    self, Container, DeletePlan, Module, NodeKind, Priority, Project, Status, StatusOutcome,
+    StatusPlan, Submodule, Task,
+};
 
 #[tauri::command]
 pub fn list_projects(db: State<'_, Db>) -> Result<Vec<Project>, String> {
@@ -98,4 +101,38 @@ pub fn apply_set_status(
     cascade: bool,
 ) -> Result<StatusOutcome, String> {
     domain::apply_set_status(&db.conn(), id, status, cascade)
+}
+
+#[tauri::command]
+pub fn plan_delete_task(db: State<'_, Db>, id: i64) -> Result<DeletePlan, String> {
+    domain::plan_delete_task(&db.conn(), id)
+}
+
+#[tauri::command]
+pub fn delete_task(db: State<'_, Db>, id: i64) -> Result<(), String> {
+    domain::delete_task(&db.conn(), id)
+}
+
+#[tauri::command]
+pub fn plan_delete_node(
+    db: State<'_, Db>,
+    kind: NodeKind,
+    id: i64,
+) -> Result<DeletePlan, String> {
+    domain::plan_delete_node(&db.conn(), kind, id)
+}
+
+#[tauri::command]
+pub fn delete_node(db: State<'_, Db>, kind: NodeKind, id: i64) -> Result<(), String> {
+    domain::delete_node(&db.conn(), kind, id)
+}
+
+#[tauri::command]
+pub fn plan_delete_project(db: State<'_, Db>, id: i64) -> Result<DeletePlan, String> {
+    domain::plan_delete_project(&db.conn(), id)
+}
+
+#[tauri::command]
+pub fn delete_project(db: State<'_, Db>, id: i64) -> Result<(), String> {
+    domain::delete_project(&db.conn(), id)
 }

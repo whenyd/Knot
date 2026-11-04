@@ -92,6 +92,17 @@ impl Container {
     }
 }
 
+/// 能整组删除的两级分类节点。
+///
+/// 模块和子模块的 id 各自独立（都从 1 开始），只传一个 id 无法区分，
+/// 所以命令必须同时带上 kind。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeKind {
+    Module,
+    Submodule,
+}
+
 /// 左栏的一项：项目，或虚拟的「待办」（`id` 为 `None`、`is_todo` 为 `true`）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,6 +164,13 @@ pub struct StatusOutcome {
     pub changed: Vec<Task>,
     /// 父任务被自动改动时的轻提示。用户自己点的这一下不产生提示。
     pub notices: Vec<String>,
+}
+
+/// 删除前的告知：这次会删掉多少个任务（含子任务）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletePlan {
+    pub task_count: i64,
 }
 
 /// 任务表的列顺序，读任务的地方只有这一份，避免 `row.get(i)` 的序号漂移。
@@ -504,6 +522,118 @@ pub fn apply_set_status(
 }
 
 // ---------------------------------------------------------------------------
+// 删除
+// ---------------------------------------------------------------------------
+
+/// 删除任务的第一步：只数会删掉几条，不写库。
+///
+/// 子任务靠 `parent_task_id` 级联删除，所以这里的条数必须把它们算进去；
+/// 前端拿这个数字直接告诉用户。
+pub fn plan_delete_task(conn: &Connection, id: i64) -> Res<DeletePlan> {
+    load_task(conn, id)?;
+    let task_count: i64 = conn
+        .query_row(
+            "WITH RECURSIVE doomed(id) AS ( \
+                 SELECT ?1 \
+                 UNION \
+                 SELECT t.id FROM task t JOIN doomed d ON t.parent_task_id = d.id \
+             ) SELECT COUNT(*) FROM doomed",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(db_err)?;
+    Ok(DeletePlan { task_count })
+}
+
+pub fn delete_task(conn: &Connection, id: i64) -> Res<()> {
+    let removed = conn
+        .execute("DELETE FROM task WHERE id = ?1", params![id])
+        .map_err(db_err)?;
+    if removed == 0 {
+        return Err(format!("任务 {id} 不存在"));
+    }
+    Ok(())
+}
+
+/// 删除模块 / 子模块的第一步：只数会删掉几条，不写库。
+///
+/// 模块的条数要把其子模块里的任务也算进来——它们会一起级联删除。
+pub fn plan_delete_node(conn: &Connection, kind: NodeKind, id: i64) -> Res<DeletePlan> {
+    let task_count: i64 = match kind {
+        NodeKind::Module => {
+            require_module_exists(conn, id)?;
+            conn.query_row(
+                "WITH RECURSIVE doomed(id) AS ( \
+                     SELECT id FROM task \
+                      WHERE module_id = ?1 \
+                         OR submodule_id IN (SELECT id FROM submodule WHERE module_id = ?1) \
+                     UNION \
+                     SELECT t.id FROM task t JOIN doomed d ON t.parent_task_id = d.id \
+                 ) SELECT COUNT(*) FROM doomed",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?
+        }
+        NodeKind::Submodule => {
+            require_submodule_exists(conn, id)?;
+            conn.query_row(
+                "WITH RECURSIVE doomed(id) AS ( \
+                     SELECT id FROM task WHERE submodule_id = ?1 \
+                     UNION \
+                     SELECT t.id FROM task t JOIN doomed d ON t.parent_task_id = d.id \
+                 ) SELECT COUNT(*) FROM doomed",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?
+        }
+    };
+    Ok(DeletePlan { task_count })
+}
+
+pub fn delete_node(conn: &Connection, kind: NodeKind, id: i64) -> Res<()> {
+    let (table, label) = match kind {
+        NodeKind::Module => ("module", "模块"),
+        NodeKind::Submodule => ("submodule", "子模块"),
+    };
+    let removed = conn
+        .execute(&format!("DELETE FROM {table} WHERE id = ?1"), params![id])
+        .map_err(db_err)?;
+    if removed == 0 {
+        return Err(format!("{label} {id} 不存在"));
+    }
+    Ok(())
+}
+
+/// 删除项目的第一步：项目里的全部任务都会随项目级联删除。
+pub fn plan_delete_project(conn: &Connection, id: i64) -> Res<DeletePlan> {
+    require_project(conn, id)?;
+    let task_count: i64 = conn
+        .query_row(
+            "WITH RECURSIVE doomed(id) AS ( \
+                 SELECT id FROM task WHERE project_id = ?1 \
+                 UNION \
+                 SELECT t.id FROM task t JOIN doomed d ON t.parent_task_id = d.id \
+             ) SELECT COUNT(*) FROM doomed",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(db_err)?;
+    Ok(DeletePlan { task_count })
+}
+
+pub fn delete_project(conn: &Connection, id: i64) -> Res<()> {
+    let removed = conn
+        .execute("DELETE FROM project WHERE id = ?1", params![id])
+        .map_err(db_err)?;
+    if removed == 0 {
+        return Err(format!("项目 {id} 不存在"));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // 内部
 // ---------------------------------------------------------------------------
 
@@ -626,6 +756,21 @@ fn require_module_exists(conn: &Connection, module_id: i64) -> Res<()> {
         Ok(())
     } else {
         Err(format!("模块 {module_id} 不存在"))
+    }
+}
+
+fn require_submodule_exists(conn: &Connection, submodule_id: i64) -> Res<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM submodule WHERE id = ?1)",
+            params![submodule_id],
+            |row| row.get(0),
+        )
+        .map_err(db_err)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(format!("子模块 {submodule_id} 不存在"))
     }
 }
 
@@ -1325,6 +1470,163 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // 删除
+    // -----------------------------------------------------------------------
+
+    /// 先数后删：条数包含子任务，plan 本身不动库。
+    #[test]
+    fn delete_task_counts_children_then_cascades() {
+        let conn = conn();
+        let task = seed_task(&conn);
+        let open = insert_child(&conn, &task, "处理并发刷新", Status::Todo);
+        let done = insert_child(&conn, &task, "补过期用例", Status::Done);
+
+        let plan = plan_delete_task(&conn, task.id).unwrap();
+        assert_eq!(plan.task_count, 3, "父任务 + 两个子任务");
+        assert_eq!(load_task(&conn, task.id).unwrap().title, "实现 token 轮换");
+
+        delete_task(&conn, task.id).unwrap();
+        assert!(load_task(&conn, task.id).is_err());
+        assert!(load_task(&conn, open).is_err());
+        assert!(load_task(&conn, done).is_err());
+    }
+
+    /// 删模块：子模块、模块里的任务、子模块里的任务及其子任务一起消失，
+    /// 未分类任务与别的项目不受影响。
+    #[test]
+    fn delete_module_counts_submodule_tasks_and_cascades() {
+        let conn = conn();
+        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let container = Container::Project { id: project_id };
+        let module = create_module(&conn, project_id, "认证").unwrap();
+        let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
+
+        let in_module = create_task(&conn, container, Some(module.id), None, "登录限流").unwrap();
+        let in_submodule = create_task(
+            &conn,
+            container,
+            Some(module.id),
+            Some(submodule.id),
+            "补过期用例",
+        )
+        .unwrap();
+        let child = insert_child(&conn, &in_submodule, "先写失败用例", Status::Todo);
+        let outside = create_task(&conn, container, None, None, "整理文档").unwrap();
+
+        let plan = plan_delete_node(&conn, NodeKind::Module, module.id).unwrap();
+        assert_eq!(plan.task_count, 3, "模块任务 + 子模块任务 + 子任务");
+        assert_eq!(list_tasks(&conn, container).unwrap().len(), 4, "plan 不写库");
+
+        delete_node(&conn, NodeKind::Module, module.id).unwrap();
+
+        let remaining = list_tasks(&conn, container).unwrap();
+        assert_eq!(
+            remaining.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
+            vec!["整理文档"]
+        );
+        assert!(list_modules(&conn, project_id).unwrap().is_empty(), "子模块随模块删除");
+        assert!(load_task(&conn, in_module.id).is_err());
+        assert!(load_task(&conn, in_submodule.id).is_err());
+        assert!(load_task(&conn, child).is_err());
+        assert_eq!(load_task(&conn, outside.id).unwrap().title, "整理文档");
+    }
+
+    /// 删子模块只带走子模块里的任务，模块直属任务保留。
+    #[test]
+    fn delete_submodule_leaves_module_tasks_alone() {
+        let conn = conn();
+        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let container = Container::Project { id: project_id };
+        let module = create_module(&conn, project_id, "认证").unwrap();
+        let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
+
+        let in_module = create_task(&conn, container, Some(module.id), None, "登录限流").unwrap();
+        let in_submodule = create_task(
+            &conn,
+            container,
+            Some(module.id),
+            Some(submodule.id),
+            "补过期用例",
+        )
+        .unwrap();
+        let child = insert_child(&conn, &in_submodule, "先写失败用例", Status::Todo);
+
+        let plan = plan_delete_node(&conn, NodeKind::Submodule, submodule.id).unwrap();
+        assert_eq!(plan.task_count, 2);
+
+        delete_node(&conn, NodeKind::Submodule, submodule.id).unwrap();
+        assert!(load_task(&conn, in_submodule.id).is_err());
+        assert!(load_task(&conn, child).is_err());
+        assert_eq!(load_task(&conn, in_module.id).unwrap().title, "登录限流");
+
+        let modules = list_modules(&conn, project_id).unwrap();
+        assert_eq!(modules.len(), 1);
+        assert!(modules[0].submodules.is_empty());
+    }
+
+    /// 删项目：项目里的所有任务（含未分类、子任务）与模块树全部消失，
+    /// 待办和别的项目一条都不动。
+    #[test]
+    fn delete_project_counts_all_tasks_and_cascades() {
+        let conn = conn();
+        let doomed = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let kept = create_project(&conn, "支付网关").unwrap().id.unwrap();
+        let container = Container::Project { id: doomed };
+
+        let module = create_module(&conn, doomed, "认证").unwrap();
+        let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
+        create_task(&conn, container, Some(module.id), None, "登录限流").unwrap();
+        let in_submodule = create_task(
+            &conn,
+            container,
+            Some(module.id),
+            Some(submodule.id),
+            "补过期用例",
+        )
+        .unwrap();
+        insert_child(&conn, &in_submodule, "先写失败用例", Status::Todo);
+        create_task(&conn, container, None, None, "整理文档").unwrap();
+
+        create_task(&conn, Container::Todo, None, None, "待办里的").unwrap();
+        create_task(&conn, Container::Project { id: kept }, None, None, "另一个项目的").unwrap();
+
+        let plan = plan_delete_project(&conn, doomed).unwrap();
+        assert_eq!(plan.task_count, 4, "含未分类任务与子任务");
+        assert_eq!(list_tasks(&conn, container).unwrap().len(), 4, "plan 不写库");
+
+        delete_project(&conn, doomed).unwrap();
+
+        assert!(list_tasks(&conn, container).unwrap().is_empty());
+        assert!(list_modules(&conn, doomed).unwrap().is_empty());
+        assert_eq!(list_tasks(&conn, Container::Todo).unwrap().len(), 1);
+        assert_eq!(
+            list_tasks(&conn, Container::Project { id: kept })
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let projects = list_projects(&conn).unwrap();
+        assert_eq!(
+            projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["待办", "支付网关"]
+        );
+    }
+
+    #[test]
+    fn deleting_unknown_rows_errors() {
+        let conn = conn();
+        assert!(plan_delete_task(&conn, 999).is_err());
+        assert!(delete_task(&conn, 999).is_err());
+        assert!(plan_delete_node(&conn, NodeKind::Module, 999).is_err());
+        assert!(plan_delete_node(&conn, NodeKind::Submodule, 999).is_err());
+        assert!(delete_node(&conn, NodeKind::Module, 999).is_err());
+        assert!(delete_node(&conn, NodeKind::Submodule, 999).is_err());
+        assert!(plan_delete_project(&conn, 999).is_err());
+        assert!(delete_project(&conn, 999).is_err());
+    }
+
+    // -----------------------------------------------------------------------
     // IPC 字段名契约（前端 api.ts 依赖这些名称，改了就两边一起改）
     // -----------------------------------------------------------------------
 
@@ -1359,6 +1661,26 @@ mod tests {
         assert_eq!(json["needsConfirm"], true);
         assert_eq!(json["reason"], "还有 1 个未完成子任务");
         assert!(json.get("needs_confirm").is_none(), "不能是 snake_case");
+    }
+
+    #[test]
+    fn delete_plan_wire_shape_is_camel_case() {
+        let json = serde_json::to_value(DeletePlan { task_count: 3 }).unwrap();
+        assert_eq!(json["taskCount"], 3);
+        assert!(json.get("task_count").is_none(), "不能是 snake_case");
+    }
+
+    #[test]
+    fn node_kind_arg_deserializes_from_frontend() {
+        assert_eq!(
+            serde_json::from_str::<NodeKind>(r#""module""#).unwrap(),
+            NodeKind::Module
+        );
+        assert_eq!(
+            serde_json::from_str::<NodeKind>(r#""submodule""#).unwrap(),
+            NodeKind::Submodule
+        );
+        assert!(serde_json::from_str::<NodeKind>(r#""project""#).is_err());
     }
 
     #[test]

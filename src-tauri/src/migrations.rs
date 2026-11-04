@@ -7,7 +7,7 @@ use rusqlite::Connection;
 /// 顺序执行的迁移脚本。索引 `i` 的脚本把库从版本 `i` 推到 `i + 1`。
 ///
 /// 追加新条目即可；已发布的条目一个字都不要改。
-pub const MIGRATIONS: &[&str] = &[V1_INITIAL_SCHEMA];
+pub const MIGRATIONS: &[&str] = &[V1_INITIAL_SCHEMA, V2_TASK_CLASSIFICATION_CASCADE];
 
 /// v1：项目 / 模块 / 子模块 / 任务，两层分类 + 一层子任务。
 const V1_INITIAL_SCHEMA: &str = r#"
@@ -43,6 +43,38 @@ CREATE TABLE task (
   note           TEXT    NOT NULL DEFAULT '',
   sort_order     INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE INDEX idx_task_project ON task(project_id);
+CREATE INDEX idx_task_module  ON task(module_id);
+CREATE INDEX idx_task_parent  ON task(parent_task_id);
+"#;
+
+/// v2：删除模块 / 子模块时，组内任务跟着删除，而不是退回归类。
+///
+/// SQLite 不能直接改外键动作，只能重建表。迁移期间外键已被关闭，
+/// 所以可以整表拷贝；`parent_task_id` 的自引用会随表名一起更新。
+const V2_TASK_CLASSIFICATION_CASCADE: &str = r#"
+CREATE TABLE task_v2 (
+  id             INTEGER PRIMARY KEY,
+  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,  -- NULL = 「待办」
+  module_id      INTEGER REFERENCES module(id) ON DELETE CASCADE,
+  submodule_id   INTEGER REFERENCES submodule(id) ON DELETE CASCADE,
+  parent_task_id INTEGER REFERENCES task_v2(id) ON DELETE CASCADE,  -- NULL = 顶层任务
+  title          TEXT    NOT NULL,
+  status         TEXT    NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','doing','done')),
+  priority       TEXT    NOT NULL DEFAULT 'mid'  CHECK (priority IN ('high','mid','low')),
+  note           TEXT    NOT NULL DEFAULT '',
+  sort_order     INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT INTO task_v2 (id, project_id, module_id, submodule_id, parent_task_id,
+                     title, status, priority, note, sort_order)
+SELECT id, project_id, module_id, submodule_id, parent_task_id,
+       title, status, priority, note, sort_order
+FROM task;
+
+DROP TABLE task;
+ALTER TABLE task_v2 RENAME TO task;
 
 CREATE INDEX idx_task_project ON task(project_id);
 CREATE INDEX idx_task_module  ON task(module_id);
@@ -165,5 +197,62 @@ mod tests {
         conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64 + 1)
             .unwrap();
         assert!(migrate(&mut conn).is_err());
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    /// v2 只重建 task 表：老数据原样保留，分类外键改成级联删除。
+    #[test]
+    fn v2_upgrades_existing_data_and_cascades() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+        conn.execute_batch(
+            "INSERT INTO project (id, name) VALUES (1, '项目');
+             INSERT INTO module (id, project_id, name) VALUES (1, 1, '模块');
+             INSERT INTO submodule (id, module_id, name) VALUES (1, 1, '子模块');
+             INSERT INTO task (id, project_id, module_id, submodule_id, title)
+                    VALUES (1, 1, 1, 1, '父任务');
+             INSERT INTO task (id, project_id, module_id, submodule_id, parent_task_id, title)
+                    VALUES (2, 1, 1, 1, 1, '子任务');
+             INSERT INTO task (id, project_id, title) VALUES (3, 1, '未归类');",
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(count(&conn, "task"), 3);
+        assert_eq!(count(&conn, "submodule"), 1);
+
+        let actions: Vec<(String, String)> = {
+            let mut stmt = conn.prepare("PRAGMA foreign_key_list(task)").unwrap();
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(3)?, row.get(6)?)))
+                .unwrap();
+            rows.map(|row| row.unwrap()).collect()
+        };
+        for column in ["module_id", "submodule_id"] {
+            assert!(
+                actions
+                    .iter()
+                    .any(|(from, on_delete)| from == column && on_delete == "CASCADE"),
+                "{column} 没有改成级联删除：{actions:?}"
+            );
+        }
+
+        conn.execute("DELETE FROM module WHERE id = 1", []).unwrap();
+        assert_eq!(count(&conn, "task"), 1, "组内任务应随模块一起删除");
+        assert_eq!(count(&conn, "submodule"), 0);
+        check_foreign_keys(&conn).unwrap();
     }
 }

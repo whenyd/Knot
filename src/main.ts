@@ -10,12 +10,13 @@ import {
   api,
   type Container,
   type Module,
+  type NodeKind,
   type Priority,
   type Project,
   type Status,
   type Task,
 } from "./api";
-import { openMenu, type MenuItem } from "./menu";
+import { closeMenu, openMenu, type MenuItem } from "./menu";
 import {
   buildGroups,
   countGroup,
@@ -35,6 +36,11 @@ const STATUS_LABELS: Record<Status, string> = { todo: "未完成", doing: "进�
 // 优先级是浮窗选择：三档都摆出来，不用循环着找。
 const PRIORITY_ORDER: Priority[] = ["high", "mid", "low"];
 const PRIORITY_LABELS: Record<Priority, string> = { high: "高", mid: "中", low: "低" };
+const PRIORITY_DOTS: Record<Priority, string> = {
+  high: "#dc2626",
+  mid: "#d97706",
+  low: "#64748b",
+};
 
 interface State {
   projects: Project[];
@@ -129,7 +135,7 @@ async function selectProject(project: Project): Promise<void> {
   state.scope = { kind: "project" };
   state.collapsedNodes.clear();
   state.collapsedGroups.clear();
-  closePriorityPicker();
+  closeMenu();
   await reload();
 }
 
@@ -176,13 +182,17 @@ function renderSideItem(project: Project): HTMLButtonElement {
     if (project.isTodo || project.id === null) return;
     const projectId = project.id;
     event.preventDefault();
-    openMenu(event.clientX, event.clientY, [
-      { label: "新建模块", onSelect: () => void createModuleIn(projectId) },
-      {
-        label: "重命名项目",
-        onSelect: () => void renameNode({ kind: "project", id: projectId, name: project.name }),
-      },
-    ]);
+    openMenu({
+      items: [
+        { label: "新建模块", onSelect: () => void createModuleIn(projectId) },
+        {
+          label: "重命名项目",
+          onSelect: () => void renameNode({ kind: "project", id: projectId, name: project.name }),
+        },
+        { label: "删除项目", onSelect: () => void deleteProjectFlow(project) },
+      ],
+      position: { kind: "point", x: event.clientX, y: event.clientY },
+    });
   });
 
   return button;
@@ -304,7 +314,7 @@ function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
     const items = scopeMenuItems(options);
     if (items.length === 0) return;
     event.preventDefault();
-    openMenu(event.clientX, event.clientY, items);
+    openMenu({ items, position: { kind: "point", x: event.clientX, y: event.clientY } });
   });
 
   return row;
@@ -328,6 +338,7 @@ function scopeMenuItems(options: ScopeNodeOptions): MenuItem[] {
           label: "重命名模块",
           onSelect: () => void renameNode({ kind: "module", id: scope.id, name: label }),
         },
+        { label: "删除模块", onSelect: () => void deleteNodeFlow("module", scope.id, label) },
       ];
     case "submodule":
       return [
@@ -335,6 +346,7 @@ function scopeMenuItems(options: ScopeNodeOptions): MenuItem[] {
           label: "重命名子模块",
           onSelect: () => void renameNode({ kind: "submodule", id: scope.id, name: label }),
         },
+        { label: "删除子模块", onSelect: () => void deleteNodeFlow("submodule", scope.id, label) },
       ];
     case "unclassified":
       return [];
@@ -452,7 +464,7 @@ function renderTaskRow(task: Task): HTMLTableRowElement {
     renderPriorityCell(task),
     renderTitleCell(task),
     renderNoteCell(task),
-    el("td"), // 「…」菜单列留给归类/删除命令，还没有对应命令，先不放假按钮
+    renderActionsCell(task),
   );
   return row;
 }
@@ -478,7 +490,7 @@ function renderPriorityCell(task: Task): HTMLTableCellElement {
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");
   button.addEventListener("click", () => {
-    openPriorityPicker(button, task);
+    openPriorityMenu(button, task);
   });
   cell.append(button);
   return cell;
@@ -497,6 +509,25 @@ function renderNoteCell(task: Task): HTMLTableCellElement {
   const cell = el("td", "cell-note");
   const note = task.note.trim();
   cell.append(el("span", note ? "note" : "note is-empty", note || "—"));
+  return cell;
+}
+
+/** 行尾「…」：这一列先只放删除；归类命令以后也走这里。 */
+function renderActionsCell(task: Task): HTMLTableCellElement {
+  const cell = el("td", "cell-actions");
+  const button = el("button", "row-menu", "…");
+  button.type = "button";
+  button.title = "更多";
+  button.setAttribute("aria-label", `任务「${task.title}」的更多操作`);
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
+  button.addEventListener("click", () => {
+    openMenu({
+      items: [{ label: "删除任务", onSelect: () => void deleteTaskFlow(task) }],
+      position: { kind: "anchor", element: button },
+    });
+  });
+  cell.append(button);
   return cell;
 }
 
@@ -530,95 +561,20 @@ async function cycleStatus(task: Task): Promise<void> {
 }
 
 /** 优先级浮窗。改完行会按组内排序跳走，给新位置一次短暂高亮。 */
-let picker: HTMLElement | null = null;
-
-function openPriorityPicker(anchor: HTMLButtonElement, task: Task): void {
-  // 再点一次同一个格子就收起（按钮语义）
-  if (picker && anchor.dataset.pickerAnchor === "open") {
-    closePriorityPicker();
-    return;
-  }
-  closePriorityPicker();
-
-  const menu = el("div", "picker");
-  menu.setAttribute("role", "menu");
-  menu.setAttribute("aria-label", "优先级");
-
-  for (const priority of PRIORITY_ORDER) {
-    const current = priority === task.priority;
-    const item = el("button", current ? "picker-item is-current" : "picker-item");
-    item.type = "button";
-    item.setAttribute("role", "menuitemradio");
-    item.setAttribute("aria-checked", String(current));
-    item.append(el("span", `picker-dot picker-dot-${priority}`), el("span", undefined, PRIORITY_LABELS[priority]));
-    if (current) item.append(el("span", "picker-check", "✓"));
-    item.addEventListener("click", () => {
-      closePriorityPicker();
-      if (!current) void applyPriority(task, priority);
-    });
-    menu.append(item);
-  }
-
-  // 浮窗挂在 body 上：表格容器有 overflow，挂在格子里会被裁掉。
-  document.body.append(menu);
-
-  const rect = anchor.getBoundingClientRect();
-  const { offsetWidth: width, offsetHeight: height } = menu;
-  const flipUp = rect.bottom + 4 + height > window.innerHeight;
-  menu.style.top = `${Math.round(flipUp ? rect.top - 4 - height : rect.bottom + 4)}px`;
-  menu.style.left = `${Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)))}px`;
-
-  picker = menu;
-  anchor.dataset.pickerAnchor = "open";
-  anchor.setAttribute("aria-expanded", "true");
-  menu.querySelector<HTMLButtonElement>(".is-current")?.focus();
-
-  menu.addEventListener("keydown", movePickerFocus);
-  document.addEventListener("mousedown", onPickerOutside);
-  document.addEventListener("keydown", onPickerKeydown);
-  window.addEventListener("scroll", closePriorityPicker, { capture: true, once: true });
-}
-
-function closePriorityPicker(): void {
-  if (!picker) return;
-  picker.remove();
-  picker = null;
-
-  const anchor = document.querySelector<HTMLButtonElement>('[data-picker-anchor="open"]');
-  if (anchor) {
-    delete anchor.dataset.pickerAnchor;
-    anchor.setAttribute("aria-expanded", "false");
-  }
-
-  document.removeEventListener("mousedown", onPickerOutside);
-  document.removeEventListener("keydown", onPickerKeydown);
-  window.removeEventListener("scroll", closePriorityPicker, { capture: true });
-}
-
-function onPickerOutside(event: MouseEvent): void {
-  if (picker && event.target instanceof Node && picker.contains(event.target)) return;
-  closePriorityPicker();
-}
-
-function onPickerKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") {
-    event.preventDefault();
-    // 焦点还给打开它的那个格子，键盘用户不至于掉到 body 上
-    const anchor = document.querySelector<HTMLButtonElement>('[data-picker-anchor="open"]');
-    closePriorityPicker();
-    anchor?.focus();
-  }
-}
-
-function movePickerFocus(event: KeyboardEvent): void {
-  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-  const items = [...(picker?.querySelectorAll<HTMLButtonElement>(".picker-item") ?? [])];
-  if (items.length === 0) return;
-  event.preventDefault();
-
-  const index = items.indexOf(document.activeElement as HTMLButtonElement);
-  const step = event.key === "ArrowDown" ? 1 : -1;
-  items[(index + step + items.length) % items.length].focus();
+function openPriorityMenu(anchor: HTMLButtonElement, task: Task): void {
+  openMenu({
+    items: PRIORITY_ORDER.map((priority) => ({
+      label: PRIORITY_LABELS[priority],
+      dot: PRIORITY_DOTS[priority],
+      checked: priority === task.priority,
+      onSelect: () => {
+        if (priority !== task.priority) void applyPriority(task, priority);
+      },
+    })),
+    position: { kind: "anchor", element: anchor },
+    label: "优先级",
+    restoreFocus: anchor,
+  });
 }
 
 async function applyPriority(task: Task, priority: Priority): Promise<void> {
@@ -950,6 +906,102 @@ async function renameNode(target: RenameTarget): Promise<void> {
     else if (target.kind === "module") await api.renameModule(target.id, name);
     else await api.renameSubmodule(target.id, name);
     await reload();
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
+
+/** 删除任务：先问后端会连带删掉几个子任务，再确认。 */
+async function deleteTaskFlow(task: Task): Promise<void> {
+  try {
+    const plan = await api.planDeleteTask(task.id);
+    const extra = plan.taskCount - 1;
+    const body =
+      extra > 0
+        ? `「${task.title}」连同 ${extra} 个子任务会被删除，无法撤销。`
+        : `「${task.title}」会被删除，无法撤销。`;
+
+    const confirmed = await askConfirm({ title: "删除任务？", body, confirmText: "删除" });
+    if (!confirmed) return;
+
+    await api.deleteTask(task.id);
+    await reload();
+    showNotice("已删除任务");
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
+
+/** 删除模块 / 子模块：组内任务一并删除，条数含子模块里的任务。 */
+async function deleteNodeFlow(kind: NodeKind, id: number, label: string): Promise<void> {
+  const noun = kind === "module" ? "模块" : "子模块";
+  try {
+    const plan = await api.planDeleteNode(kind, id);
+    const body =
+      plan.taskCount > 0
+        ? `${noun}「${label}」和其中的 ${plan.taskCount} 个任务会被删除，无法撤销。`
+        : `${noun}「${label}」会被删除，无法撤销。`;
+
+    const confirmed = await askConfirm({ title: `删除${noun}？`, body, confirmText: "删除" });
+    if (!confirmed) return;
+
+    // 正停在被删的子树里，就把范围收回「全部」——不能停在一个已经不存在的地方。
+    const scopeWasInside = scopeInsideNode(kind, id);
+    const submoduleIds =
+      kind === "module" ? (state.modules.find((m) => m.id === id)?.submodules ?? []) : [];
+    await api.deleteNode(kind, id);
+    state.collapsedNodes.delete(id);
+    for (const submodule of submoduleIds) state.collapsedNodes.delete(submodule.id);
+    if (scopeWasInside) state.scope = { kind: "project" };
+
+    await reload();
+    showNotice(`已删除${noun}「${label}」`);
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
+
+function scopeInsideNode(kind: NodeKind, id: number): boolean {
+  if (kind === "submodule") {
+    return state.scope.kind === "submodule" && state.scope.id === id;
+  }
+  if (state.scope.kind === "module") return state.scope.id === id;
+  if (state.scope.kind === "submodule") {
+    const scopeId = state.scope.id;
+    return state.modules.some(
+      (module) => module.id === id && module.submodules.some((sub) => sub.id === scopeId),
+    );
+  }
+  return false;
+}
+
+/** 删除项目：项目里的任务一并删除；正停在这个项目就回落到「待办」。 */
+async function deleteProjectFlow(project: Project): Promise<void> {
+  if (project.id === null) return;
+  const id = project.id;
+
+  try {
+    const plan = await api.planDeleteProject(id);
+    const body =
+      plan.taskCount > 0
+        ? `项目「${project.name}」和其中的 ${plan.taskCount} 个任务会被删除，无法撤销。`
+        : `项目「${project.name}」会被删除，无法撤销。`;
+
+    const confirmed = await askConfirm({ title: "删除项目？", body, confirmText: "删除" });
+    if (!confirmed) return;
+
+    const wasHere = state.container.kind === "project" && state.container.id === id;
+    await api.deleteProject(id);
+
+    if (wasHere) {
+      state.container = { kind: "todo" };
+      state.scope = { kind: "project" };
+      state.collapsedNodes.clear();
+      state.collapsedGroups.clear();
+    }
+
+    await reload();
+    showNotice(`已删除项目「${project.name}」`);
   } catch (error) {
     showNotice(describe(error), "error");
   }
