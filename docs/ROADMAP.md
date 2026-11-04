@@ -1,6 +1,6 @@
 # 后续任务
 
-后续所有工作的执行参考。依据：`goal-and-requirements.md`（要什么）、`architecture.md`（怎么分层、命令清单）、以及当前代码的真实状态。
+后续所有工作的执行参考。依据：`docs/specs/goal-and-requirements.md`（要什么）、`docs/specs/architecture.md`（怎么分层、命令清单）、以及当前代码的真实状态。
 
 新改一条能力前，先看这里对应任务前面有没有未定的「待决问题」；改完把规格补进 goal/architecture，再回来把任务勾掉。
 
@@ -51,7 +51,7 @@ reset_database   // 仅 dev build 注册；release 不注册、前端不显示�
 ### D1 · 删除模块时，里面的任务去哪？—— **已定：确认后一并删除**
 
 - 结论：删除模块/子模块时，组内任务**真删**（先弹窗告知条数），不退回未分类。
-- 已同步：`goal-and-requirements.md`「删除」去掉了“（推断）”；`architecture.md` 的 schema 把 `task.module_id` / `submodule_id` 改成 `ON DELETE CASCADE`，并写明为什么需要一条 v2 迁移（v1 已发布为 `SET NULL`，历史条目不能改）。
+- 已同步：`docs/specs/goal-and-requirements.md`「删除」去掉了“（推断）”；`docs/specs/architecture.md` 的 schema 把 `task.module_id` / `submodule_id` 改成 `ON DELETE CASCADE`，并写明为什么需要一条 v2 迁移（v1 已发布为 `SET NULL`，历史条目不能改）。
 - 连带结论：删项目同样是“带走它的所有任务”——`project_id` 本来就是 `CASCADE`，无需迁移。
 
 ### D2 · 子模块与模块的新建入口 —— **已定：左栏右键菜单**
@@ -180,4 +180,4 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
    - 需要验证调用链时，让 mock 后端**有状态**（`create_task` 真的往数组里追加、`list_tasks` 真的返回它），脚本模拟点击/输入。
    - **收尾时按端口找 PID 再 `taskkill //F //PID`**：`background_command stop` 杀不掉 `npx` 拉起的子进程，会占着 1420 让 `tauri dev` 起不来。
 3. 真实窗口 `npm run tauri dev` 过一遍交互——截图能证明渲染，证明不了“点下去之后数据对不对”。
-4. 收尾把规格改动写回 `goal-and-requirements.md` / `architecture.md`，再更新本文件的状态。
+4. 收尾把规格改动写回 `docs/specs/goal-and-requirements.md` / `docs/specs/architecture.md`，再更新本文件的状态。

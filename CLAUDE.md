@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 单人、本机、不联网的桌面待办（Tauri 2 + 原生 DOM/TypeScript + SQLite）。规格分三份，动手前先读：
 
-- `goal-and-requirements.md` — 要什么（能力、取舍、Non-Goals）
-- `architecture.md` — 怎么分层、数据模型、命令清单、交互约定
-- `ROADMAP.md` — 还剩什么、依赖顺序、**动手前必须确认的待决问题（D1–D5）**
+- `docs/specs/goal-and-requirements.md` — 要什么（能力、取舍、Non-Goals）
+- `docs/specs/architecture.md` — 怎么分层、数据模型、命令清单、交互约定
+- `docs/ROADMAP.md` — 还剩什么、依赖顺序、**动手前必须确认的待决问题（D1–D5）**
 
 规格驱动：改行为前先看 ROADMAP 对应任务有没有未决问题；改完把规格写回 goal/architecture，再勾掉 ROADMAP。README 的「当前状态」一节已滞后（仍写 14 条命令、不能删除），以 ROADMAP 为准。
 

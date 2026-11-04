@@ -1,8 +1,8 @@
 # todolist
 
 开发任务的结构化清单：单人、本机、不联网的桌面待办。
-需求见 [goal-and-requirements.md](goal-and-requirements.md)，分层与数据模型见 [architecture.md](architecture.md)，
-**剩下要做什么见 [ROADMAP.md](ROADMAP.md)**。
+需求见 [docs/specs/goal-and-requirements.md](docs/specs/goal-and-requirements.md)，分层与数据模型见 [docs/specs/architecture.md](docs/specs/architecture.md)，
+**剩下要做什么见 [docs/ROADMAP.md](docs/ROADMAP.md)**。
 
 ## 当前状态
 
@@ -18,7 +18,7 @@
 
 结构能建能改名，但还不能删；任务能改状态/优先级/文字，但不能归类移动或写备注。
 
-尚未实现的部分、它们的依赖顺序以及动手前必须先定的问题，全部列在 [ROADMAP.md](ROADMAP.md)，
+尚未实现的部分、它们的依赖顺序以及动手前必须先定的问题，全部列在 [docs/ROADMAP.md](docs/ROADMAP.md)，
 不在本文重复维护。
 
 ## 结构
@@ -47,7 +47,8 @@ npm install
 npm run tauri dev      # 开发窗口（前端热更新）
 npm test               # 前端纯函数单测（vitest）
 npm run build          # 前端类型检查 + 打包
-npm run tauri build    # 出安装包（需系统已有 WiX/NSIS；否则用 npx tauri build --no-bundle）
+npm run tauri build    # 出安装包（需系统已有 WiX/NSIS）
+npx tauri build --no-bundle    # 只出 release exe，不打包安装包、不下载 WiX/NSIS
 ```
 
 数据库文件：Windows `%APPDATA%/todolist/tasks.sqlite`（macOS/Linux 为对应平台的 app data 目录）。
