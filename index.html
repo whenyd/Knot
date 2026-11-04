@@ -79,12 +79,13 @@
          「先告知影响条数再确认」是全局形状，删除、级联完成都走它。
          不用 window.confirm：那是浏览器的原生对话框，样式与键盘行为都不受控。 -->
     <div class="modal" id="modal" hidden>
-      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-card" id="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
         <h2 class="modal-title" id="modal-title"></h2>
         <p class="modal-body" id="modal-body"></p>
         <label class="modal-field" id="modal-field" hidden>
           <span class="modal-label" id="modal-label"></span>
           <input class="modal-input" id="modal-input" autocomplete="off" spellcheck="false" />
+          <textarea class="modal-textarea" id="modal-textarea" rows="6" hidden></textarea>
         </label>
         <div class="modal-actions">
           <button class="btn" id="modal-cancel" type="button">取消</button>

@@ -8,19 +8,21 @@
 
 ## 现状
 
-**已实现（20 条命令）**
+**已实现（22 条命令）**
 
 ```
 list_projects / create_project / rename_project / plan_delete_project / delete_project
 list_modules / create_module / create_submodule / rename_module / rename_submodule
 plan_delete_node / delete_node
-list_tasks / create_task / rename_task / set_priority / plan_set_status / apply_set_status
+list_tasks / create_task / rename_task / set_note / move_task / set_priority
+plan_set_status / apply_set_status
 plan_delete_task / delete_task
 ```
 
 界面：左栏（待办 + 项目 + 范围树 + **右键菜单**）、固定按模块分组的表格（分组折叠、子树计数）、
-状态点击循环三态、优先级浮窗、双击就地改名、**新建任务落入当前范围**、应用内确认框与输入弹窗、
-**任务行尾「…」菜单与三级结构删除**（确认框告知连带任务数，删除后自动回落视图）。
+状态点击循环三态、优先级浮窗、双击就地改名、**新建任务落入当前范围**、应用内确认框、输入弹窗与
+**多行备注弹窗**、**任务行尾「…」菜单**（移动到任意归类 + 删除）、
+**三级结构删除**（确认框告知连带任务数，删除后自动回落视图）。
 
 **规格里有、代码里没有**
 
@@ -29,8 +31,8 @@ plan_delete_task / delete_task
 | 三级结构可新建 | ✅ 已完成（阶段一 T1/T2） |
 | 三级结构可改名 | ✅ 已完成（阶段一 T3） |
 | 删除（任务 / 模块 / 子模块 / 项目） | ✅ 已完成（阶段二 T4–T7） |
-| 归类与跨容器移动 | `move_task` 没有，任务建完就再也动不了位置 |
-| 备注 | 表格只读显示摘要，`set_note` 与弹窗编辑都没有 |
+| 归类与跨容器移动 | ✅ 已完成（阶段三 T9） |
+| 备注 | ✅ 已完成（阶段三 T8） |
 | 子任务（一层） | 新建、渲染、继承归属全无 |
 | 父子状态联动 | `apply_set_status` 的 `notices` 恒为空；`needs_confirm` 分支数据触发不到 |
 | 状态 / 优先级筛选 | 顶部标签全无，「取消勾选已完成」无从表达 |
@@ -90,12 +92,12 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 | ~~T6~~ | ✅ **删除项目**（已完成） | `plan_delete_project(id)` / `delete_project(id)` + 菜单项 | 条数含全项目任务；删完若正停在该项目则回落到「待办」 | D1、T1 |
 | ~~T7~~ | ✅ **把剩下两处菜单并进 `src/menu.ts`**（已完成） | `src/menu.ts` 已是通用组件（T1 建好）；任务行菜单（T4 引入）直接用它；优先级浮窗（`main.ts` 里原来的 `.picker`）也改用它 | 只有一份“弹出/定位/关闭”的实现；优先级浮窗的方向键与 Esc 行为不变 | T1、T4 |
 
-### 阶段 3 · 备注与归类移动
+### 阶段 3 · 备注与归类移动 — 已完成
 
 | # | 任务 | 改动位置 | 验收 | 依赖 |
 | --- | --- | --- | --- | --- |
-| T8 | 备注弹窗 | `domain::set_note` + 点备注格弹窗（复用 modal 骨架，改成文本域） | 任意文本（含换行）保存后表格显示单行截断摘要；空备注显示 `—` | — |
-| T9 | 归类移动 | `domain::move_task(id, target)`（校验目标模块/子模块归属）+「…」菜单 →「移动到 → 待办 / 项目 / 模块 / 子模块」 | 双向可移动；移动后 `sort_order` 取目标组末尾；跨容器时两侧视图都要重取 | T7 |
+| ~~T8~~ | ✅ **备注弹窗**（已完成） | `domain::set_note`（原样落库，空串=清空）+ 点备注格弹窗（复用 modal 骨架，`askNote` 用文本域，Enter 是换行） | 任意文本（含换行）保存后表格显示单行截断摘要；空备注显示 `—` | — |
+| ~~T9~~ | ✅ **归类移动**（已完成） | `domain::move_task(id, target)`（归属校验与 `create_task` 共用 `require_task_target`；子任务跟随父任务换容器）+「…」菜单 →「移动到…」二级菜单 | 双向可移动；移动后 `sort_order` 取目标组末尾；跨容器时两侧视图都要重取 | T7 |
 
 ### 阶段 4 · 子任务与状态联动
 

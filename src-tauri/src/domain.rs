@@ -92,6 +92,18 @@ impl Container {
     }
 }
 
+/// `move_task` 的目标位置：容器 + 两级分类（可空）。
+///
+/// 形状与 `create_task` 的归属参数一致，前端原样回传；合法性规则也共用
+/// `require_task_target`，移动不会比新建多出一套判断。
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveTarget {
+    pub container: Container,
+    pub module_id: Option<i64>,
+    pub submodule_id: Option<i64>,
+}
+
 /// 能整组删除的两级分类节点。
 ///
 /// 模块和子模块的 id 各自独立（都从 1 开始），只传一个 id 无法区分，
@@ -373,22 +385,7 @@ pub fn create_task(
     title: &str,
 ) -> Res<Task> {
     let title = require_name(title, "任务文字")?;
-
-    let project_id = container.project_id();
-    match (project_id, module_id) {
-        (Some(project_id), Some(module_id)) => {
-            require_project(conn, project_id)?;
-            require_module(conn, project_id, module_id)?;
-        }
-        // 「待办」没有模块，带模块归属是调用方的错
-        (None, Some(_)) => return Err("「待办」里的任务不属于任何模块".to_string()),
-        (Some(project_id), None) => require_project(conn, project_id)?,
-        (None, None) => {}
-    }
-    if let Some(submodule_id) = submodule_id {
-        let module_id = module_id.ok_or("子模块必须附属于一个模块")?;
-        require_submodule(conn, module_id, submodule_id)?;
-    }
+    let project_id = require_task_target(conn, container, module_id, submodule_id)?;
 
     let sort_order = next_sort_order(
         conn,
@@ -454,6 +451,78 @@ pub fn set_priority(conn: &Connection, id: i64, priority: Priority) -> Res<Task>
     .map_err(db_err)?;
 
     task.priority = priority;
+    Ok(task)
+}
+
+/// 改备注。**不 trim、不拒空**：备注允许任意文本（含换行与首尾空白），
+/// 空串就是清空备注。表格里的单行摘要是展示层的事，落库保持原样。
+pub fn set_note(conn: &Connection, id: i64, note: &str) -> Res<Task> {
+    let mut task = load_task(conn, id)?;
+
+    conn.execute(
+        "UPDATE task SET note = ?1 WHERE id = ?2",
+        params![note, id],
+    )
+    .map_err(db_err)?;
+
+    task.note = note.to_string();
+    Ok(task)
+}
+
+/// 把顶层任务移到另一个归类：容器、模块、子模块可以一起变。
+///
+/// 目标组的合法性完全交给 `require_task_target`（与新建同一套规则）；
+/// 移动后排在目标组末尾。子任务不能单独移动——它的归属真相在父任务上，
+/// 这里只把它的 `project_id` 跟着换成新容器。
+pub fn move_task(conn: &Connection, id: i64, target: MoveTarget) -> Res<Task> {
+    let mut task = load_task(conn, id)?;
+    if task.parent_task_id.is_some() {
+        return Err("子任务跟随父任务，不能单独移动".to_string());
+    }
+
+    let project_id = require_task_target(
+        conn,
+        target.container,
+        target.module_id,
+        target.submodule_id,
+    )?;
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+
+    // 与 `create_task` 逐字相同的分组条件：移动后的排序号就是那个组的 MAX+1。
+    let sort_order = next_sort_order(
+        &tx,
+        "task",
+        "project_id IS ?1 AND module_id IS ?2 AND submodule_id IS ?3 \
+         AND parent_task_id IS NULL",
+        params![project_id, target.module_id, target.submodule_id],
+    )?;
+
+    tx.execute(
+        "UPDATE task SET project_id = ?1, module_id = ?2, submodule_id = ?3, sort_order = ?4 \
+          WHERE id = ?5",
+        params![
+            project_id,
+            target.module_id,
+            target.submodule_id,
+            sort_order,
+            id
+        ],
+    )
+    .map_err(db_err)?;
+
+    // 子任务跟随容器；两级分类保持 NULL，归属仍由父任务表达。
+    tx.execute(
+        "UPDATE task SET project_id = ?1 WHERE parent_task_id = ?2",
+        params![project_id, id],
+    )
+    .map_err(db_err)?;
+
+    tx.commit().map_err(db_err)?;
+
+    task.project_id = project_id;
+    task.module_id = target.module_id;
+    task.submodule_id = target.submodule_id;
+    task.sort_order = sort_order;
     Ok(task)
 }
 
@@ -901,6 +970,35 @@ fn require_submodule(conn: &Connection, module_id: i64, submodule_id: i64) -> Re
     } else {
         Err(format!("子模块 {submodule_id} 不属于模块 {module_id}"))
     }
+}
+
+/// 任务归属的唯一校验：新建与移动都走这里。
+///
+/// 返回任务应落的 `project_id`（「待办」为 `None`）。规则：
+/// 容器是项目时项目必须存在；带模块时模块必须属于该项目；
+/// 「待办」不能带模块；带子模块时必须先有模块，且子模块属于该模块。
+fn require_task_target(
+    conn: &Connection,
+    container: Container,
+    module_id: Option<i64>,
+    submodule_id: Option<i64>,
+) -> Res<Option<i64>> {
+    let project_id = container.project_id();
+    match (project_id, module_id) {
+        (Some(project_id), Some(module_id)) => {
+            require_project(conn, project_id)?;
+            require_module(conn, project_id, module_id)?;
+        }
+        // 「待办」没有模块，带模块归属是调用方的错
+        (None, Some(_)) => return Err("「待办」里的任务不属于任何模块".to_string()),
+        (Some(project_id), None) => require_project(conn, project_id)?,
+        (None, None) => {}
+    }
+    if let Some(submodule_id) = submodule_id {
+        let module_id = module_id.ok_or("子模块必须附属于一个模块")?;
+        require_submodule(conn, module_id, submodule_id)?;
+    }
+    Ok(project_id)
 }
 
 /// 同组内下一个排序号（组内没有任务时为 0）。
@@ -1624,6 +1722,251 @@ mod tests {
         assert!(delete_node(&conn, NodeKind::Submodule, 999).is_err());
         assert!(plan_delete_project(&conn, 999).is_err());
         assert!(delete_project(&conn, 999).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // 备注
+    // -----------------------------------------------------------------------
+
+    /// 备注允许换行与连续空白，落库保持原样——摘要的单行化是展示层的事。
+    #[test]
+    fn set_note_keeps_multiline_text() {
+        let conn = conn();
+        let task = seed_task(&conn);
+        let note = "第一行\n第二行\n\n缩进  空格";
+
+        let updated = set_note(&conn, task.id, note).unwrap();
+        assert_eq!(updated.note, note);
+        assert_eq!(load_task(&conn, task.id).unwrap().note, note);
+    }
+
+    /// 空串是"清空"，不是"拒绝"。
+    #[test]
+    fn set_note_can_clear() {
+        let conn = conn();
+        let task = seed_task(&conn);
+        set_note(&conn, task.id, "先写点东西").unwrap();
+
+        let cleared = set_note(&conn, task.id, "").unwrap();
+        assert_eq!(cleared.note, "");
+        assert_eq!(load_task(&conn, task.id).unwrap().note, "");
+    }
+
+    #[test]
+    fn set_note_unknown_task_errors() {
+        let conn = conn();
+        assert!(set_note(&conn, 999, "x").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // 归类移动
+    // -----------------------------------------------------------------------
+
+    /// 移动后落在目标组末尾：排序号是目标组已有的 MAX+1，不是原值。
+    #[test]
+    fn move_task_to_module_appends_in_target_group() {
+        let conn = conn();
+        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let container = Container::Project { id: project_id };
+        let module = create_module(&conn, project_id, "认证").unwrap();
+        let existing = create_task(&conn, container, Some(module.id), None, "模块里的第一条").unwrap();
+        let task = create_task(&conn, container, None, None, "未分类的").unwrap();
+        assert_eq!(task.sort_order, 0, "未分类组从头数起");
+        assert_eq!(existing.sort_order, 0);
+
+        let moved = move_task(
+            &conn,
+            task.id,
+            MoveTarget {
+                container,
+                module_id: Some(module.id),
+                submodule_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(moved.project_id, Some(project_id));
+        assert_eq!(moved.module_id, Some(module.id));
+        assert_eq!(moved.submodule_id, None);
+        assert_eq!(moved.sort_order, existing.sort_order + 1);
+
+        let after = load_task(&conn, task.id).unwrap();
+        assert_eq!(after.module_id, Some(module.id));
+        assert_eq!(after.sort_order, 1);
+    }
+
+    /// 跨项目移动：父任务换到 B 的模块，子任务只跟容器（分类仍由父任务表达）。
+    #[test]
+    fn move_task_across_projects_moves_children_project() {
+        let conn = conn();
+        let a = create_project(&conn, "A").unwrap().id.unwrap();
+        let b = create_project(&conn, "B").unwrap().id.unwrap();
+        let module_b = create_module(&conn, b, "认证").unwrap();
+
+        let parent = create_task(&conn, Container::Project { id: a }, None, None, "父任务").unwrap();
+        let child = insert_child(&conn, &parent, "子任务", Status::Todo);
+
+        move_task(
+            &conn,
+            parent.id,
+            MoveTarget {
+                container: Container::Project { id: b },
+                module_id: Some(module_b.id),
+                submodule_id: None,
+            },
+        )
+        .unwrap();
+
+        let parent_after = load_task(&conn, parent.id).unwrap();
+        assert_eq!(parent_after.project_id, Some(b));
+        assert_eq!(parent_after.module_id, Some(module_b.id));
+
+        let child_after = load_task(&conn, child).unwrap();
+        assert_eq!(child_after.project_id, Some(b), "子任务跟着父任务换容器");
+        assert_eq!(child_after.module_id, None);
+        assert_eq!(child_after.submodule_id, None);
+    }
+
+    /// 移回「待办」等于清空三级分类；子任务的容器也一起清空。
+    #[test]
+    fn move_task_to_todo_clears_classification() {
+        let conn = conn();
+        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let module = create_module(&conn, project_id, "认证").unwrap();
+        let task = create_task(
+            &conn,
+            Container::Project { id: project_id },
+            Some(module.id),
+            None,
+            "登录限流",
+        )
+        .unwrap();
+        let child = insert_child(&conn, &task, "子任务", Status::Todo);
+
+        let moved = move_task(
+            &conn,
+            task.id,
+            MoveTarget {
+                container: Container::Todo,
+                module_id: None,
+                submodule_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(moved.project_id, None);
+        assert_eq!(moved.module_id, None);
+        assert_eq!(moved.submodule_id, None);
+        assert_eq!(load_task(&conn, child).unwrap().project_id, None);
+    }
+
+    /// 非法目标全部拒绝，且被移动的任务一个字段都不变。
+    #[test]
+    fn move_task_rejects_invalid_targets() {
+        let conn = conn();
+        let a = create_project(&conn, "A").unwrap().id.unwrap();
+        let b = create_project(&conn, "B").unwrap().id.unwrap();
+        let module_a = create_module(&conn, a, "认证").unwrap();
+        let module_b = create_module(&conn, b, "计费").unwrap();
+        let submodule_a = seed_submodule(&conn, module_a.id, "token 刷新");
+        let submodule_b = seed_submodule(&conn, module_b.id, "账单");
+
+        let task = create_task(
+            &conn,
+            Container::Project { id: a },
+            Some(module_a.id),
+            None,
+            "登录限流",
+        )
+        .unwrap();
+
+        let attempts = [
+            // 跨项目的模块
+            MoveTarget {
+                container: Container::Project { id: a },
+                module_id: Some(module_b.id),
+                submodule_id: None,
+            },
+            // 子模块缺模块
+            MoveTarget {
+                container: Container::Project { id: a },
+                module_id: None,
+                submodule_id: Some(submodule_a),
+            },
+            // 张冠李戴的子模块
+            MoveTarget {
+                container: Container::Project { id: a },
+                module_id: Some(module_a.id),
+                submodule_id: Some(submodule_b),
+            },
+            // 「待办」带模块
+            MoveTarget {
+                container: Container::Todo,
+                module_id: Some(module_a.id),
+                submodule_id: None,
+            },
+            // 未知项目
+            MoveTarget {
+                container: Container::Project { id: 999 },
+                module_id: None,
+                submodule_id: None,
+            },
+        ];
+
+        for target in attempts {
+            assert!(move_task(&conn, task.id, target).is_err(), "{target:?} 应被拒");
+            let after = load_task(&conn, task.id).unwrap();
+            assert_eq!(after.project_id, Some(a));
+            assert_eq!(after.module_id, Some(module_a.id));
+            assert_eq!(after.submodule_id, None);
+        }
+
+        assert!(move_task(
+            &conn,
+            999,
+            MoveTarget {
+                container: Container::Todo,
+                module_id: None,
+                submodule_id: None,
+            }
+        )
+        .is_err());
+    }
+
+    /// 子任务不能单独移动：归属的真相在父任务上。
+    #[test]
+    fn move_task_rejects_subtask() {
+        let conn = conn();
+        let target_project = create_project(&conn, "B").unwrap().id.unwrap();
+        let parent = seed_task(&conn);
+        let child = insert_child(&conn, &parent, "子任务", Status::Todo);
+
+        let error = move_task(
+            &conn,
+            child,
+            MoveTarget {
+                container: Container::Project { id: target_project },
+                module_id: None,
+                submodule_id: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("子任务"), "错误要说清原因：{error}");
+        assert_eq!(load_task(&conn, parent.id).unwrap().project_id, None);
+        assert_eq!(load_task(&conn, child).unwrap().project_id, None);
+    }
+
+    #[test]
+    fn move_target_arg_deserializes_from_frontend() {
+        let target: MoveTarget = serde_json::from_str(
+            r#"{"container":{"kind":"project","id":3},"moduleId":7,"submoduleId":null}"#,
+        )
+        .unwrap();
+
+        assert_eq!(target.module_id, Some(7));
+        assert_eq!(target.submodule_id, None);
+        assert!(matches!(target.container, Container::Project { id: 3 }));
     }
 
     // -----------------------------------------------------------------------

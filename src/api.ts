@@ -22,6 +22,11 @@ export interface ScopeTarget {
   submoduleId: number | null;
 }
 
+/** 移动目标：容器 + 两级分类。字段名与 Rust 的 `MoveTarget` 逐字对应。 */
+export interface MoveTarget extends ScopeTarget {
+  container: Container;
+}
+
 export interface Project {
   /** 「待办」没有 id —— 它不是数据库里的一行。 */
   id: number | null;
@@ -91,6 +96,8 @@ export const api = {
   createTask: (container: Container, target: ScopeTarget, title: string) =>
     invoke<Task>("create_task", { container, ...target, title }),
   renameTask: (id: number, title: string) => invoke<Task>("rename_task", { id, title }),
+  setNote: (id: number, note: string) => invoke<Task>("set_note", { id, note }),
+  moveTask: (id: number, target: MoveTarget) => invoke<Task>("move_task", { id, target }),
   setPriority: (id: number, priority: Priority) =>
     invoke<Task>("set_priority", { id, priority }),
   /** 第一步：只算要不要确认，不写库。 */

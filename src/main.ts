@@ -10,6 +10,7 @@ import {
   api,
   type Container,
   type Module,
+  type MoveTarget,
   type NodeKind,
   type Priority,
   type Project,
@@ -101,11 +102,13 @@ const dom = {
   taskInput: must<HTMLInputElement>("task-input"),
   notice: must<HTMLElement>("notice"),
   modal: must<HTMLElement>("modal"),
+  modalCard: must<HTMLElement>("modal-card"),
   modalTitle: must<HTMLElement>("modal-title"),
   modalBody: must<HTMLElement>("modal-body"),
   modalField: must<HTMLElement>("modal-field"),
   modalLabel: must<HTMLElement>("modal-label"),
   modalInput: must<HTMLInputElement>("modal-input"),
+  modalTextarea: must<HTMLTextAreaElement>("modal-textarea"),
   modalOk: must<HTMLButtonElement>("modal-ok"),
   modalCancel: must<HTMLButtonElement>("modal-cancel"),
 };
@@ -507,12 +510,18 @@ function renderTitleCell(task: Task): HTMLTableCellElement {
 
 function renderNoteCell(task: Task): HTMLTableCellElement {
   const cell = el("td", "cell-note");
-  const note = task.note.trim();
-  cell.append(el("span", note ? "note" : "note is-empty", note || "—"));
+  // 摘要：换行与连续空白折成单个空格，DOM 里永远是单行。
+  const summary = task.note.trim().replace(/\s+/g, " ");
+  const button = el("button", summary ? "note" : "note is-empty", summary || "—");
+  button.type = "button";
+  button.title = "编辑备注";
+  button.setAttribute("aria-label", `备注：${summary || "空"}`);
+  button.addEventListener("click", () => void editNote(task));
+  cell.append(button);
   return cell;
 }
 
-/** 行尾「…」：这一列先只放删除；归类命令以后也走这里。 */
+/** 行尾「…」：移动与删除。子任务跟随父任务，不提供单独的移动项。 */
 function renderActionsCell(task: Task): HTMLTableCellElement {
   const cell = el("td", "cell-actions");
   const button = el("button", "row-menu", "…");
@@ -521,11 +530,15 @@ function renderActionsCell(task: Task): HTMLTableCellElement {
   button.setAttribute("aria-label", `任务「${task.title}」的更多操作`);
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");
+
+  const items: MenuItem[] = [];
+  if (task.parentTaskId === null) {
+    items.push({ label: "移动到…", onSelect: () => void openMoveMenu(task, button) });
+  }
+  items.push({ label: "删除任务", onSelect: () => void deleteTaskFlow(task) });
+
   button.addEventListener("click", () => {
-    openMenu({
-      items: [{ label: "删除任务", onSelect: () => void deleteTaskFlow(task) }],
-      position: { kind: "anchor", element: button },
-    });
+    openMenu({ items, position: { kind: "anchor", element: button } });
   });
   cell.append(button);
   return cell;
@@ -534,6 +547,135 @@ function renderActionsCell(task: Task): HTMLTableCellElement {
 // ---------------------------------------------------------------------------
 // 写操作（格内编辑）
 // ---------------------------------------------------------------------------
+
+/** 备注：弹窗里原样编辑，空串表示清空；没改就不发命令。 */
+async function editNote(task: Task): Promise<void> {
+  const note = await askNote({
+    title: "备注",
+    label: `「${task.title}」`,
+    value: task.note,
+    confirmText: "保存",
+  });
+  if (note === null || note === task.note) return;
+
+  try {
+    await api.setNote(task.id, note);
+    await reload();
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
+
+function isSameTarget(task: Task, target: MoveTarget): boolean {
+  const { container } = target;
+  const sameContainer =
+    container.kind === "todo" ? task.projectId === null : task.projectId === container.id;
+  return (
+    sameContainer &&
+    task.moduleId === target.moduleId &&
+    task.submoduleId === target.submoduleId
+  );
+}
+
+/** 当前目标不能再选一次，直接不出现在菜单里。 */
+function moveTargetItem(task: Task, label: string, target: MoveTarget): MenuItem | null {
+  return isSameTarget(task, target)
+    ? null
+    : { label, onSelect: () => void moveTaskTo(task, target) };
+}
+
+/**
+ * 移动目标按「项目 → 模块 → 子模块」折叠成树：默认只露出待办和项目，
+ * 展开项目才看到未分类和模块，模块再展开才看到子模块。
+ * 菜单里的短标签靠层级表达归属，不再重复写完整的 `项目 › 模块 › 子模块`。
+ */
+async function moveMenuItems(task: Task): Promise<MenuItem[]> {
+  const items: MenuItem[] = [];
+  const todo = moveTargetItem(task, "待办", {
+    container: { kind: "todo" },
+    moduleId: null,
+    submoduleId: null,
+  });
+  if (todo) items.push(todo);
+
+  const projects = state.projects.filter(
+    (project): project is Project & { id: number } => project.id !== null,
+  );
+  const trees = await Promise.all(projects.map((project) => api.listModules(project.id)));
+
+  projects.forEach((project, index) => {
+    const container: Container = { kind: "project", id: project.id };
+    const children: MenuItem[] = [];
+
+    const unclassified = moveTargetItem(task, "未分类", {
+      container,
+      moduleId: null,
+      submoduleId: null,
+    });
+    if (unclassified) children.push(unclassified);
+
+    for (const module of trees[index]) {
+      const moduleTarget: MoveTarget = { container, moduleId: module.id, submoduleId: null };
+      const submoduleItems = module.submodules.flatMap((submodule) => {
+        const item = moveTargetItem(task, submodule.name, {
+          container,
+          moduleId: module.id,
+          submoduleId: submodule.id,
+        });
+        return item === null ? [] : [item];
+      });
+
+      const wholeModule = moveTargetItem(task, "整个模块", moduleTarget);
+      if (submoduleItems.length === 0) {
+        // 没有子模块可展开：模块直接当叶子项，省掉一层点击。
+        if (wholeModule) children.push({ ...wholeModule, label: module.name });
+        continue;
+      }
+      children.push({
+        label: module.name,
+        children: wholeModule ? [wholeModule, ...submoduleItems] : submoduleItems,
+      });
+    }
+
+    if (children.length > 0) items.push({ label: project.name, children });
+  });
+
+  return items;
+}
+
+/**
+ * 「移动到…」的第二级菜单：仍用同一个 `openMenu`，锚在行尾「…」按钮上。
+ * 项目 → 模块 → 子模块 由菜单组件弹成侧向子面板，父面板不重排。
+ * 当前位置不出现在列表里。
+ */
+async function openMoveMenu(task: Task, anchor: HTMLButtonElement): Promise<void> {
+  try {
+    const items = await moveMenuItems(task);
+    if (items.length === 0) {
+      showNotice("没有可移动到的位置");
+      return;
+    }
+
+    openMenu({
+      items,
+      position: { kind: "anchor", element: anchor },
+      label: "移动到",
+    });
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
+
+/** 移动成功才重画并提示；失败保持原样，别把行凭空弄丢。 */
+async function moveTaskTo(task: Task, target: MoveTarget): Promise<void> {
+  try {
+    await api.moveTask(task.id, target);
+    await reload();
+    showNotice(`已移动「${task.title}」`);
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
 
 /** 状态格循环：plan 先问"要不要确认"，needs_confirm 为真才弹窗，再 apply。 */
 async function cycleStatus(task: Task): Promise<void> {
@@ -653,7 +795,11 @@ function resetModal(): void {
   dom.modalBody.hidden = false;
   dom.modalBody.textContent = "";
   dom.modalField.hidden = true;
+  dom.modalInput.hidden = false;
   dom.modalInput.value = "";
+  dom.modalTextarea.hidden = true;
+  dom.modalTextarea.value = "";
+  dom.modalCard.classList.remove("is-wide");
 }
 
 /**
@@ -779,6 +925,58 @@ function askText(options: TextOptions): Promise<string | null> {
     dom.modalCancel.addEventListener("click", onCancel);
     dom.modal.addEventListener("click", onBackdrop);
     dom.modalInput.addEventListener("keydown", onInputKey);
+    document.addEventListener("keydown", onKey);
+
+    dismissActiveDialog = onCancel;
+  });
+}
+
+/**
+ * 多行备注弹窗。与 `askText` 的关键差异：
+ * - Enter 是换行，不是提交；确认只能点按钮。
+ * - 返回值**不 trim**，空串表示清空备注。
+ */
+function askNote(options: TextOptions): Promise<string | null> {
+  return new Promise((resolve) => {
+    beginDialog();
+    resetModal();
+    dom.modalTitle.textContent = options.title;
+    dom.modalBody.hidden = true;
+    dom.modalField.hidden = false;
+    dom.modalLabel.textContent = options.label;
+    dom.modalInput.hidden = true;
+    dom.modalTextarea.hidden = false;
+    dom.modalCard.classList.add("is-wide");
+    dom.modalTextarea.value = options.value;
+    dom.modalOk.textContent = options.confirmText;
+    dom.modal.hidden = false;
+    // 光标落在末尾：打开就是为了接着写。
+    dom.modalTextarea.focus();
+    dom.modalTextarea.setSelectionRange(options.value.length, options.value.length);
+
+    const close = (result: string | null): void => {
+      endDialog();
+      dom.modal.hidden = true;
+      dom.modalCard.classList.remove("is-wide");
+      dom.modalOk.removeEventListener("click", onSubmit);
+      dom.modalCancel.removeEventListener("click", onCancel);
+      dom.modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey);
+      resolve(result);
+    };
+
+    const onSubmit = (): void => close(dom.modalTextarea.value);
+    const onCancel = (): void => close(null);
+    const onBackdrop = (event: MouseEvent): void => {
+      if (event.target === dom.modal) close(null);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") close(null);
+    };
+
+    dom.modalOk.addEventListener("click", onSubmit);
+    dom.modalCancel.addEventListener("click", onCancel);
+    dom.modal.addEventListener("click", onBackdrop);
     document.addEventListener("keydown", onKey);
 
     dismissActiveDialog = onCancel;

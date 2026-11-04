@@ -30,6 +30,8 @@ pub fn run() {
             commands::list_tasks,
             commands::create_task,
             commands::rename_task,
+            commands::set_note,
+            commands::move_task,
             commands::set_priority,
             commands::plan_set_status,
             commands::apply_set_status,
