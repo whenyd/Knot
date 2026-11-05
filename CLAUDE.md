@@ -27,7 +27,7 @@ npm run tauri build                        # release 安装包（NSIS / MSI；�
 
 前端测试用 vitest，测试文件是 `src/grouping.test.ts`，覆盖 `grouping.ts` 的排序、分组、范围、计数与筛选纯函数。后端测试仍内嵌在 `domain.rs` / `migrations.rs` / `db.rs` / `lib.rs` 的 `#[cfg(test)]` 里，用内存库或临时目录。
 
-数据库：Windows `%APPDATA%/todolist/tasks.sqlite`。删掉该文件即重置；dev 版左栏底部另有「重置数据库（开发）」入口（只清活库与边车，保留 `.bak-*` 备份），正式版不注册这条命令。
+数据库：Windows `%APPDATA%/knot/tasks.sqlite`。删掉该文件即重置；dev 版左栏底部另有「重置数据库（开发）」入口（只清活库与边车，保留 `.bak-*` 备份），正式版不注册这条命令。
 
 ## 分层与硬性规矩
 

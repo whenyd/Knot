@@ -1,5 +1,5 @@
 [package]
-name = "todolist"
+name = "knot"
 version = "0.1.0"
 description = "开发任务的结构化清单"
 authors = ["you"]
@@ -8,7 +8,7 @@ edition = "2024"
 [lib]
 # `_lib` 后缀是为了让 lib 名与 bin 名不冲突（Windows 上会撞名，
 # 见 https://github.com/rust-lang/cargo/issues/8519）。
-name = "todolist_lib"
+name = "knot_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

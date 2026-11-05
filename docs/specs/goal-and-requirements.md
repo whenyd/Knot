@@ -1,12 +1,12 @@
 ---
 id: goal-and-requirements
 type: goal-and-requirements
-title: Todo List — 开发任务的结构化清单
+title: Knot — 开发任务的结构化清单
 status: active
 tags: [personal, desktop, tauri, developer-tasks]
 ---
 
-# Todo List — 开发任务的结构化清单
+# Knot — 开发任务的结构化清单
 
 ## Overview
 
@@ -83,7 +83,7 @@ tags: [personal, desktop, tauri, developer-tasks]
 | --- | --- | --- |
 | 应用外壳 | Tauri 2（Rust） | 安装包与内存占用远小于 Electron，桌面应用只需要一个薄壳 |
 | 前端 | Vite + TypeScript，原生 DOM，不引入 UI 框架 | 界面仍是"一张表 + 一个分组器 + 一个侧栏"，框架带来的构建与依赖成本大于收益（由我判断，非你指定，可推翻） |
-| 数据存储 | SQLite，位于应用数据目录（Windows：`%APPDATA%/todolist/tasks.sqlite`） | 你选的方案：零交互、不怕丢，也为以后任务量变大留余地 |
+| 数据存储 | SQLite，位于应用数据目录（Windows：`%APPDATA%/knot/tasks.sqlite`） | 你选的方案：零交互、不怕丢，也为以后任务量变大留余地 |
 | 数据访问 | Tauri 命令 + `rusqlite`，前端不直接碰数据库 | 数据读写集中在一处，权限与迁移都只有一条路径 |
 | 数据模型 | `project` → `module` → `submodule` → `task`；`task` 持有 `status`（未完成/进行中/已完成）、`priority`（高/中/低）、`note`、`sort_order`、`project_id`（**可空，空即属于"我的待办"**）、`module_id`/`submodule_id`（可空=默认）、`parent_id`/`parent_task_id`（可空=顶层任务，仅一层） | 层级只有两级分类 + 一层子任务，外键比通用树结构简单得多；"我的待办"不是一行真实项目，而用 `project_id` 为空表达，免去一个永远存在的系统记录 |
 | 分组、筛选、排序 | 都在前端对已取回的任务做，不落库 | 单个项目的任务量在本机是小规模，前端计算足够快，也避免为每种分组 × 筛选 × 排序组合写查询 |

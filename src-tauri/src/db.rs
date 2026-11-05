@@ -13,8 +13,8 @@ use tauri::{AppHandle, Manager};
 
 use crate::migrations;
 
-/// 应用数据子目录（Windows 下即 `%APPDATA%/todolist`）。
-pub const APP_DIR: &str = "todolist";
+/// 应用数据子目录（Windows 下即 `%APPDATA%/knot`）。
+pub const APP_DIR: &str = "knot";
 
 /// 库文件名。
 pub const DB_FILE: &str = "tasks.sqlite";
@@ -77,7 +77,7 @@ impl Db {
     }
 }
 
-/// `%APPDATA%/todolist/tasks.sqlite`，目录不存在就建。
+/// `%APPDATA%/knot/tasks.sqlite`，目录不存在就建。
 pub fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let base = app
         .path()
@@ -235,7 +235,7 @@ mod tests {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
             let dir = std::env::temp_dir()
-                .join(format!("todolist-test-{}-{tag}-{n}", std::process::id()));
+                .join(format!("knot-test-{}-{tag}-{n}", std::process::id()));
             fs::create_dir_all(&dir).unwrap();
             TempDir(dir)
         }

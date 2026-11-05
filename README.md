@@ -1,6 +1,6 @@
-# todolist
+# Knot
 
-开发任务的结构化清单：单人、本机、不联网的桌面待办。
+Knot（结）——一道结记一件事。开发任务的结构化清单：单人、本机、不联网的桌面待办。
 需求见 [docs/specs/goal-and-requirements.md](docs/specs/goal-and-requirements.md)，分层与数据模型见 [docs/specs/architecture.md](docs/specs/architecture.md)，
 **剩下要做什么见 [docs/ROADMAP.md](docs/ROADMAP.md)**。
 
@@ -32,7 +32,7 @@ src/
   menu.ts             左栏右键菜单组件（弹出/定位/关闭）
   main.ts             状态 + 事件 + 渲染（原生 DOM，无 UI 框架）
 src-tauri/src/
-  main.rs             入口，只调 todolist_lib::run()
+  main.rs             入口，只调 knot_lib::run()
   lib.rs              装配：建连接、托管状态、注册命令
   commands.rs         命令层：参数解包 + 转发，不含规则
   domain.rs           领域层：唯一写入口，所有规则住在这里（含单测）
@@ -51,7 +51,7 @@ npm run tauri build    # 出安装包（需系统已有 WiX/NSIS）
 npx tauri build --no-bundle    # 只出 release exe，不打包安装包、不下载 WiX/NSIS
 ```
 
-数据库文件：Windows `%APPDATA%/todolist/tasks.sqlite`（macOS/Linux 为对应平台的 app data 目录）。
+数据库文件：Windows `%APPDATA%/knot/tasks.sqlite`（macOS/Linux 为对应平台的 app data 目录）。
 删掉该文件即可重置。
 
 ## 分层规矩

@@ -3,7 +3,7 @@
   "app": {
     "windows": [
       {
-        "title": "我的待办",
+        "title": "Knot",
         "width": 1280,
         "height": 720,
         "minWidth": 720,

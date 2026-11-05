@@ -1383,7 +1383,7 @@ mod tests {
     #[test]
     fn new_task_lands_unclassified_in_project() {
         let conn = conn();
-        let project = create_project(&conn, "todolist-tr").unwrap();
+        let project = create_project(&conn, "knot-tr").unwrap();
         let project_id = project.id.unwrap();
 
         let task = create_task(
@@ -1498,7 +1498,7 @@ mod tests {
     #[test]
     fn modules_carry_their_submodules() {
         let conn = conn();
-        let project = create_project(&conn, "todolist-tr").unwrap();
+        let project = create_project(&conn, "knot-tr").unwrap();
         let project_id = project.id.unwrap();
         let auth = create_module(&conn, project_id, "认证").unwrap();
         create_module(&conn, project_id, "计费").unwrap();
@@ -1535,7 +1535,7 @@ mod tests {
     #[test]
     fn task_created_in_module_lands_there() {
         let conn = conn();
-        let project = create_project(&conn, "todolist-tr").unwrap();
+        let project = create_project(&conn, "knot-tr").unwrap();
         let project_id = project.id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
         seed_submodule(&conn, module.id, "token 刷新");
@@ -1558,7 +1558,7 @@ mod tests {
     #[test]
     fn task_created_in_submodule_lands_there() {
         let conn = conn();
-        let project = create_project(&conn, "todolist-tr").unwrap();
+        let project = create_project(&conn, "knot-tr").unwrap();
         let project_id = project.id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = seed_submodule(&conn, module.id, "token 刷新");
@@ -1582,7 +1582,7 @@ mod tests {
     #[test]
     fn sort_order_is_per_group() {
         let conn = conn();
-        let project = create_project(&conn, "todolist-tr").unwrap();
+        let project = create_project(&conn, "knot-tr").unwrap();
         let project_id = project.id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
@@ -1642,7 +1642,7 @@ mod tests {
     #[test]
     fn rejects_submodule_from_other_module() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let auth = create_module(&conn, project_id, "认证").unwrap();
         let billing = create_module(&conn, project_id, "计费").unwrap();
         let submodule = seed_submodule(&conn, auth.id, "token 刷新");
@@ -1664,7 +1664,7 @@ mod tests {
     #[test]
     fn rejects_module_on_todo_container() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
 
         assert!(create_task(&conn, Container::Todo, Some(module.id), None, None, "x").is_err());
@@ -1677,7 +1677,7 @@ mod tests {
     #[test]
     fn create_submodule_appends_in_its_module() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let auth = create_module(&conn, project_id, "认证").unwrap();
         let billing = create_module(&conn, project_id, "计费").unwrap();
 
@@ -1710,7 +1710,7 @@ mod tests {
     #[test]
     fn create_submodule_rejects_blank_name() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
         assert!(create_submodule(&conn, module.id, "   ").is_err());
     }
@@ -1718,13 +1718,13 @@ mod tests {
     #[test]
     fn renames_all_three_levels() {
         let conn = conn();
-        let project = create_project(&conn, "todolist-tr").unwrap();
+        let project = create_project(&conn, "knot-tr").unwrap();
         let project_id = project.id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
 
-        let renamed_project = rename_project(&conn, project_id, "  todolist  ").unwrap();
-        assert_eq!(renamed_project.name, "todolist");
+        let renamed_project = rename_project(&conn, project_id, "  knot  ").unwrap();
+        assert_eq!(renamed_project.name, "knot");
         assert_eq!(renamed_project.id, Some(project_id), "返回值仍是同一个项目");
 
         let renamed_module = rename_module(&conn, module.id, "鉴权").unwrap();
@@ -1743,14 +1743,14 @@ mod tests {
         assert_eq!(modules[0].name, "鉴权");
         assert_eq!(modules[0].submodules[0].name, "刷新令牌");
         let projects = list_projects(&conn).unwrap();
-        assert_eq!(projects[1].name, "todolist");
+        assert_eq!(projects[1].name, "knot");
     }
 
     /// 空白名被拒，且库里的旧名字不受影响。
     #[test]
     fn rename_rejects_blank_for_every_level() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
 
@@ -1758,7 +1758,7 @@ mod tests {
         assert!(rename_module(&conn, module.id, "").is_err());
         assert!(rename_submodule(&conn, submodule.id, "\t").is_err());
 
-        assert_eq!(load_project(&conn, project_id).unwrap().name, "todolist-tr");
+        assert_eq!(load_project(&conn, project_id).unwrap().name, "knot-tr");
         assert_eq!(load_module(&conn, module.id).unwrap().name, "认证");
         assert_eq!(
             load_submodule(&conn, submodule.id).unwrap().name,
@@ -1778,7 +1778,7 @@ mod tests {
     #[test]
     fn rename_does_not_touch_tasks() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
         let task = create_task(
             &conn,
@@ -1791,7 +1791,7 @@ mod tests {
         .unwrap()
         .task;
 
-        rename_project(&conn, project_id, "todolist").unwrap();
+        rename_project(&conn, project_id, "knot").unwrap();
         rename_module(&conn, module.id, "鉴权").unwrap();
 
         let after = load_task(&conn, task.id).unwrap();
@@ -1803,7 +1803,7 @@ mod tests {
     #[test]
     fn rejects_submodule_without_module() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = seed_submodule(&conn, module.id, "token 刷新");
 
@@ -2059,7 +2059,7 @@ mod tests {
     #[test]
     fn subtask_inherits_project_and_nulls_classification() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
         let parent = create_task(&conn, container, Some(module.id), None, None, "父任务")
@@ -2406,7 +2406,7 @@ mod tests {
     #[test]
     fn delete_module_counts_submodule_tasks_and_cascades() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
@@ -2461,7 +2461,7 @@ mod tests {
     #[test]
     fn delete_submodule_leaves_module_tasks_alone() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
@@ -2499,7 +2499,7 @@ mod tests {
     #[test]
     fn delete_project_counts_all_tasks_and_cascades() {
         let conn = conn();
-        let doomed = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let doomed = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let kept = create_project(&conn, "支付网关").unwrap().id.unwrap();
         let container = Container::Project { id: doomed };
 
@@ -2784,7 +2784,7 @@ mod tests {
     #[test]
     fn move_task_to_module_appends_in_target_group() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
         let existing = create_task(
@@ -2869,7 +2869,7 @@ mod tests {
     #[test]
     fn move_task_to_todo_clears_classification() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
         let task = create_task(
             &conn,
@@ -3012,7 +3012,7 @@ mod tests {
     #[test]
     fn demote_appends_under_target_and_clears_classification() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
         let target = create_task(&conn, container, Some(module.id), None, None, "目标父任务")
@@ -3145,7 +3145,7 @@ mod tests {
     #[test]
     fn promote_inherits_parent_placement_and_appends() {
         let conn = conn();
-        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();

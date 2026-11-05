@@ -197,8 +197,8 @@ if (import.meta.env.DEV) {
 // ---------------------------------------------------------------------------
 
 type ThemeMode = "light" | "dark" | "system";
-const THEME_STORAGE_KEY = "todolist.theme.v1";
-const PROJECT_STORAGE_KEY = "todolist.currentProject.v1";
+const THEME_STORAGE_KEY = "knot.theme.v1";
+const PROJECT_STORAGE_KEY = "knot.currentProject.v1";
 
 function readThemeMode(): ThemeMode {
   try {
@@ -437,7 +437,7 @@ const COLUMN_ORDER: readonly ResizableColumn[] = [
   "end",
   "note",
 ];
-const COLUMN_STORAGE_KEY = "todolist.columnWidths.v1";
+const COLUMN_STORAGE_KEY = "knot.columnWidths.v1";
 
 let fixedWidths: Record<FixedColumn, number> | null = null;
 let titleColumnWidth = 0;
@@ -2431,7 +2431,7 @@ if (document.readyState === "loading") {
  * 后端在 setup 里把主窗口换成 `index.html?startupError=...`，这里直接接管。
  */
 function renderStartupError(message: string): void {
-  document.title = "无法启动 — 我的待办";
+  document.title = "无法启动 — Knot";
   document.body.classList.add("startup-error-body");
 
   const panel = el("main", "startup-error");

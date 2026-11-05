@@ -165,7 +165,7 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 | # | 任务 | 改动位置 | 验收 | 依赖 |
 | --- | --- | --- | --- | --- |
 | ~~T20~~ | ✅ **前端纯函数单测**（已完成） | 引入 vitest 5；`src/grouping.test.ts` 覆盖 `grouping.ts` 的 `sortTasks` / `buildGroups` / `selectScope` / `resolveTarget` / `countGroup`（另含筛选函数） | `npm test` 绿（14 条）；`resolveTarget` 的子模块用例会守住“必须同时给出 moduleId”，故意改坏实现时该用例变红 | — |
-| ~~T21~~ | ✅ **release 构建实跑**（已完成；安装包按归档约定跳过） | `npx tauri build --no-bundle`（无 bundler）；release exe | 启动 release exe 一次：CDP 创建项目/模块/任务后删除模块，`plan.taskCount=1`，库中 `tasks_in_module=0`、`total_tasks=0`、`foreign_key_check=[]`、`user_version=3`；库路径 `%APPDATA%\todolist\tasks.sqlite`。系统无 WiX/NSIS，项目已归档，不再下载 bundler | T17 |
+| ~~T21~~ | ✅ **release 构建实跑**（已完成；安装包按归档约定跳过） | `npx tauri build --no-bundle`（无 bundler）；release exe | 启动 release exe 一次：CDP 创建项目/模块/任务后删除模块，`plan.taskCount=1`，库中 `tasks_in_module=0`、`total_tasks=0`、`foreign_key_check=[]`、`user_version=3`；库路径 `%APPDATA%\knot\tasks.sqlite`。系统无 WiX/NSIS，项目已归档，不再下载 bundler | T17 |
 | T22 | （可选）CI | GitHub Actions：`cargo test` + `tsc` + `vitest` | 每个 PR 自动跑 | T20 |
 
 阶段 7 实现决策：

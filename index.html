@@ -6,7 +6,7 @@
       // 先定主题再加载样式，避免首屏先闪一下浅色（CSP 为 null，允许内联）。
       (() => {
         try {
-          const stored = localStorage.getItem("todolist.theme.v1");
+          const stored = localStorage.getItem("knot.theme.v1");
           const mode = stored === "light" || stored === "dark" || stored === "system" ? stored : "light";
           const dark =
             mode === "dark" ||
@@ -19,7 +19,7 @@
     </script>
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>我的待办</title>
+    <title>Knot</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 
@@ -303,7 +303,7 @@
             <img id="about-icon" alt="" width="40" height="40" />
           </div>
           <div class="about-heading">
-            <h2 class="about-title" id="about-title">我的待办</h2>
+            <h2 class="about-title" id="about-title">Knot</h2>
             <span class="about-version" id="about-version">v0.1.0</span>
           </div>
         </div>
