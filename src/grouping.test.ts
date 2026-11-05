@@ -59,7 +59,7 @@ describe("buildGroups", () => {
     makeModule(20, "后端"),
   ];
 
-  it("按子模块、模块、默认归组；子任务不单独成组", () => {
+  it("默认分组排在模块之前；按子模块、模块、默认归组，子任务不单独成组", () => {
     const groups = buildGroups(
       [
         makeTask({ id: 1, moduleId: 10, submoduleId: 100 }),
@@ -72,15 +72,15 @@ describe("buildGroups", () => {
     );
 
     expect(groups.map((group) => [group.kind, group.id, group.label])).toEqual([
+      ["unclassified", null, "默认"],
       ["module", 10, "前端"],
       ["module", 20, "后端"],
-      ["unclassified", null, "默认"],
     ]);
-    expect(groups[0].tasks.map((task) => task.id)).toEqual([2]);
-    expect(groups[0].children[0].tasks.map((task) => task.id)).toEqual([1]);
-    expect(groups[1].tasks).toEqual([]);
-    expect(groups[1].children).toEqual([]);
-    expect(groups[2].tasks.map((task) => task.id)).toEqual([3]);
+    expect(groups[0].tasks.map((task) => task.id)).toEqual([3]);
+    expect(groups[1].tasks.map((task) => task.id)).toEqual([2]);
+    expect(groups[1].children[0].tasks.map((task) => task.id)).toEqual([1]);
+    expect(groups[2].tasks).toEqual([]);
+    expect(groups[2].children).toEqual([]);
   });
 
   it("用户建的模块和子模块即使为空也保留，空默认分组不出现", () => {

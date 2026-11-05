@@ -76,9 +76,23 @@ export function buildGroups(tasks: readonly Task[], modules: readonly Module[]):
 
   const take = (key: string) => sortTasks(store.get(key) ?? []);
 
+  // 「默认」是派生分组，空时不占一行；未归类任务最需要先看到，所以排在模块之前。
+  const groups: Group[] = [];
+  const unclassified = take("unclassified");
+  if (unclassified.length > 0) {
+    groups.push({
+      kind: "unclassified",
+      id: null,
+      label: "默认",
+      depth: 0,
+      tasks: unclassified,
+      children: [],
+    });
+  }
+
   // 用户建的模块与子模块一律保留，即使暂时是 0/0：它们是结构，
-  // 藏起来会让人以为没建成；「默认」是派生分组，空时不占一行。
-  const groups: Group[] = modules.map((module) => ({
+  // 藏起来会让人以为没建成。
+  const moduleGroups: Group[] = modules.map((module) => ({
     kind: "module",
     id: module.id,
     label: module.name,
@@ -93,18 +107,7 @@ export function buildGroups(tasks: readonly Task[], modules: readonly Module[]):
       children: [],
     })),
   }));
-
-  const unclassified = take("unclassified");
-  if (unclassified.length > 0) {
-    groups.push({
-      kind: "unclassified",
-      id: null,
-      label: "默认",
-      depth: 0,
-      tasks: unclassified,
-      children: [],
-    });
-  }
+  groups.push(...moduleGroups);
 
   return groups;
 }

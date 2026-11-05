@@ -747,9 +747,9 @@ button.note:focus-visible {
   font-size: 13px;
 }
 
-/* 改优先级后行会跳到新位置，短暂闪一下背景，让人跟得上 */
+/* 改优先级 / 移动后行会跳到新位置，短暂闪一下背景，让人跟得上（持续 1 秒） */
 .row-task.just-moved > td {
-  animation: flash-move 1.1s ease-out;
+  animation: flash-move 1s ease-out;
 }
 
 @keyframes flash-move {

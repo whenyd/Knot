@@ -511,6 +511,19 @@ function renderScopeTree(groups: Group[]): void {
     }),
   );
 
+  // 「默认」排在模块之前，与表格分组顺序一致；空默认分组不占一行。
+  const unclassified = groups.find((group) => group.kind === "unclassified");
+  if (unclassified) {
+    dom.scopeSection.append(
+      renderScopeNode({
+        scope: { kind: "unclassified" },
+        label: unclassified.label,
+        count: countGroup(unclassified),
+        indent: 0,
+      }),
+    );
+  }
+
   for (const group of groups) {
     if (group.kind !== "module" || group.id === null) continue;
     const collapsed = state.collapsedNodes.has(group.id);
@@ -537,18 +550,6 @@ function renderScopeTree(groups: Group[]): void {
         }),
       );
     }
-  }
-
-  const unclassified = groups.find((group) => group.kind === "unclassified");
-  if (unclassified) {
-    dom.scopeSection.append(
-      renderScopeNode({
-        scope: { kind: "unclassified" },
-        label: unclassified.label,
-        count: countGroup(unclassified),
-        indent: 0,
-      }),
-    );
   }
 }
 
@@ -1318,6 +1319,7 @@ async function moveTaskTo(task: Task, target: MoveTarget): Promise<void> {
   try {
     await api.moveTask(task.id, target);
     await reload();
+    flashTaskTree(task.id);
     showNotice(`已移动「${task.title}」`);
   } catch (error) {
     showNotice(describe(error), "error");
@@ -1390,7 +1392,7 @@ async function applyPriority(task: Task, priority: Priority): Promise<void> {
     await api.setPriority(task.id, priority);
     await reload();
     if (cascaded > 0) showNotice(`已同步下调 ${cascaded} 个子任务的优先级`);
-    flashRow(task.id);
+    flashTaskTree(task.id);
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -1447,10 +1449,17 @@ async function commitRename(task: Task, title: string): Promise<void> {
   }
 }
 
-/** 改完优先级后，让被移动的那一行在新位置闪一下，免得"行跳走了找不着"。 */
-function flashRow(taskId: number): void {
-  const row = dom.body.querySelector<HTMLTableRowElement>(`tr[data-task-id="${taskId}"]`);
-  row?.classList.add("just-moved");
+/** 改完优先级 / 移动完成后，让跳走的父任务和跟着走的子任务行一起闪一下。 */
+function flashTaskTree(taskId: number): void {
+  const ids = [
+    taskId,
+    ...state.tasks.filter((task) => task.parentTaskId === taskId).map((task) => task.id),
+  ];
+  for (const id of ids) {
+    dom.body
+      .querySelector<HTMLTableRowElement>(`tr[data-task-id="${id}"]`)
+      ?.classList.add("just-moved");
+  }
 }
 
 // ---------------------------------------------------------------------------
