@@ -33,9 +33,13 @@ import {
   type TaskFilters,
 } from "./grouping";
 import { initTooltips } from "./tooltip";
+import appIcon from "../src-tauri/icons/icon.png";
 
 /** 数据库起不来时，后端通过这个 query 参数把原因交给前端。 */
 const STARTUP_ERROR_PARAM = "startupError";
+
+/** 与 src-tauri/tauri.conf.json 的 version 保持一致。 */
+const APP_VERSION = "0.1.0";
 
 // 状态是三态**循环**：一个字段一个控件，点一下换下一个值。
 const NEXT_STATUS: Record<Status, Status> = { todo: "doing", doing: "done", done: "todo" };
@@ -159,6 +163,14 @@ const dom = {
   statusCount: must<HTMLElement>("status-count"),
   themeBtn: must<HTMLButtonElement>("theme-btn"),
   themeLabel: must<HTMLElement>("theme-label"),
+  aboutBtn: must<HTMLButtonElement>("about-btn"),
+  aboutModal: must<HTMLElement>("about-modal"),
+  aboutOk: must<HTMLButtonElement>("about-ok"),
+  aboutIcon: must<HTMLImageElement>("about-icon"),
+  aboutVersion: must<HTMLElement>("about-version"),
+  aboutVersionRow: must<HTMLElement>("about-version-row"),
+  aboutPlatform: must<HTMLElement>("about-platform"),
+  aboutRuntime: must<HTMLElement>("about-runtime"),
   notice: must<HTMLElement>("notice"),
   resizeTip: must<HTMLElement>("resize-tip"),
   modal: must<HTMLElement>("modal"),
@@ -274,6 +286,55 @@ async function initWindowControls(): Promise<void> {
     // 浏览器里跑 Vite 时没有 Tauri 运行时，按钮只作为静态预览。
     console.warn("窗口控制初始化失败", error);
   }
+}
+
+function platformLabel(): string {
+  const platform = detectPlatform();
+  const os = platform === "macos" ? "macOS" : platform === "linux" ? "Linux" : "Windows";
+  const ua = navigator.userAgent;
+  const arch = /arm64|aarch64/i.test(ua)
+    ? "ARM64"
+    : /WOW64|Win32/i.test(ua) && !/x64/i.test(ua)
+      ? "x86"
+      : "x64";
+  return `${os} · ${arch}`;
+}
+
+function runtimeLabel(): string {
+  const platform = detectPlatform();
+  if (platform === "macos") return "Tauri 2 · WKWebView";
+  if (platform === "linux") return "Tauri 2 · WebKitGTK";
+  return "Tauri 2 · WebView2";
+}
+
+function openAboutDialog(): void {
+  if (!dom.aboutModal.hidden) return;
+  closeMenu();
+  dom.aboutIcon.src = appIcon;
+  dom.aboutVersion.textContent = `v${APP_VERSION}`;
+  dom.aboutVersionRow.textContent = APP_VERSION;
+  dom.aboutPlatform.textContent = platformLabel();
+  dom.aboutRuntime.textContent = runtimeLabel();
+  dom.aboutModal.hidden = false;
+  dom.aboutOk.focus();
+
+  const close = (): void => {
+    dom.aboutModal.hidden = true;
+    dom.aboutOk.removeEventListener("click", close);
+    dom.aboutModal.removeEventListener("click", onBackdrop);
+    document.removeEventListener("keydown", onKey);
+    dom.aboutBtn.focus();
+  };
+  const onBackdrop = (event: MouseEvent): void => {
+    if (event.target === dom.aboutModal) close();
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") close();
+  };
+
+  dom.aboutOk.addEventListener("click", close);
+  dom.aboutModal.addEventListener("click", onBackdrop);
+  document.addEventListener("keydown", onKey);
 }
 
 function readSavedProjectId(): number | null {
@@ -2409,6 +2470,7 @@ function boot(): void {
   // 拖拽区会先被 Tauri 的拖动逻辑拦截，菜单的全局 mousedown 收不到；这里用捕获阶段先收起。
   dom.titlebarDrag.addEventListener("mousedown", () => closeMenu(), true);
   dom.projectBtn.addEventListener("click", openProjectMenu);
+  dom.aboutBtn.addEventListener("click", openAboutDialog);
   initTooltips();
   initColumnResizing();
   render();

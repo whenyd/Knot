@@ -269,6 +269,7 @@
             </svg>
             <span id="theme-label">浅色</span>
           </button>
+          <button class="status-btn" id="about-btn" type="button" title="关于">关于</button>
         </div>
       </footer>
     </div>
@@ -291,6 +292,49 @@
         <div class="modal-actions">
           <button class="btn" id="modal-cancel" type="button">取消</button>
           <button class="btn btn-primary" id="modal-ok" type="button"></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="about-modal" hidden>
+      <div class="modal-card about-card" role="dialog" aria-modal="true" aria-labelledby="about-title">
+        <div class="about-head">
+          <div class="about-logo" aria-hidden="true">
+            <img id="about-icon" alt="" width="40" height="40" />
+          </div>
+          <div class="about-heading">
+            <h2 class="about-title" id="about-title">我的待办</h2>
+            <span class="about-version" id="about-version">v0.1.0</span>
+          </div>
+        </div>
+
+        <p class="about-desc">AI时代本地优先的个人桌面待办应用</p>
+
+        <dl class="about-rows">
+          <div class="about-row">
+            <dt>版本</dt>
+            <dd id="about-version-row">0.1.0</dd>
+          </div>
+          <div class="about-row">
+            <dt>平台</dt>
+            <dd id="about-platform">Windows · x64</dd>
+          </div>
+          <div class="about-row">
+            <dt>运行时</dt>
+            <dd id="about-runtime">Tauri 2 · WebView2</dd>
+          </div>
+          <div class="about-row">
+            <dt>许可证</dt>
+            <dd>MIT</dd>
+          </div>
+          <div class="about-row">
+            <dt>版权</dt>
+            <dd>© 2026 Whenyd</dd>
+          </div>
+        </dl>
+
+        <div class="modal-actions">
+          <button class="btn btn-primary" id="about-ok" type="button">确定</button>
         </div>
       </div>
     </div>

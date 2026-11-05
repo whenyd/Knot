@@ -1876,6 +1876,89 @@ button.group-caret.has-icon::before {
   font-size: 13px;
 }
 
+/* 关于：图标 + 版本 + 简介 + 只读信息表。 */
+.about-card {
+  width: min(380px, calc(100vw - 48px));
+  padding: 20px 22px 16px;
+}
+
+.about-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.about-logo {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  overflow: hidden;
+  border-radius: 9px;
+}
+
+.about-logo img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.about-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.about-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.about-version {
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.about-desc {
+  margin: 14px 0 16px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.about-rows {
+  margin: 0 0 18px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.about-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.about-row dt {
+  color: var(--text-3);
+}
+
+.about-row dd {
+  margin: 0;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.about-card .modal-actions {
+  margin-top: 0;
+}
+
 .btn {
   height: 26px;
   padding: 0 12px;
