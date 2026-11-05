@@ -8,6 +8,7 @@ import {
   filterTasks,
   resolveTarget,
   selectScope,
+  sortParentCandidates,
   sortTasks,
   taskMatchesFilters,
 } from "./grouping";
@@ -40,16 +41,150 @@ function makeModule(
 }
 
 describe("sortTasks", () => {
-  it("按优先级、再按添加顺序排序，且不修改原数组", () => {
-    const low = makeTask({ id: 1, priority: "low", sortOrder: 1 });
-    const highLater = makeTask({ id: 2, priority: "high", sortOrder: 9 });
-    const mid = makeTask({ id: 3, priority: "mid", sortOrder: 2 });
-    const highEarlier = makeTask({ id: 4, priority: "high", sortOrder: 3 });
+  it("按优先级、再按创建时间升序排序，且不修改原数组", () => {
+    const low = makeTask({ id: 1, priority: "low", createdAt: "2026-01-01T08:00", sortOrder: 1 });
+    const highLater = makeTask({
+      id: 2,
+      priority: "high",
+      createdAt: "2026-01-01T08:00",
+      sortOrder: 9,
+    });
+    const mid = makeTask({ id: 3, priority: "mid", createdAt: "2026-01-02T08:00", sortOrder: 2 });
+    const highEarlier = makeTask({
+      id: 4,
+      priority: "high",
+      createdAt: "2025-12-01T08:00",
+      sortOrder: 3,
+    });
     const tasks = [low, highLater, mid, highEarlier];
     const before = [...tasks];
 
     expect(sortTasks(tasks).map((task) => task.id)).toEqual([4, 2, 3, 1]);
     expect(tasks).toEqual(before);
+  });
+
+  it("已完成整组排在最后，组内仍按优先级 → 创建时间", () => {
+    const doneHigh = makeTask({
+      id: 1,
+      status: "done",
+      priority: "high",
+      createdAt: "2025-01-01T08:00",
+    });
+    const todoLow = makeTask({
+      id: 2,
+      status: "todo",
+      priority: "low",
+      createdAt: "2026-01-01T08:00",
+    });
+    const doingMid = makeTask({
+      id: 3,
+      status: "doing",
+      priority: "mid",
+      createdAt: "2026-02-01T08:00",
+    });
+    const doneLow = makeTask({
+      id: 4,
+      status: "done",
+      priority: "low",
+      createdAt: "2025-06-01T08:00",
+    });
+
+    expect(sortTasks([doneHigh, todoLow, doingMid, doneLow]).map((task) => task.id)).toEqual([
+      3, 2, 1, 4,
+    ]);
+  });
+
+  it("创建时间缺失时视为最早；时间相同再按添加顺序与 id", () => {
+    const legacy = makeTask({ id: 5, priority: "high", createdAt: null, sortOrder: 9 });
+    const laterAdd = makeTask({
+      id: 6,
+      priority: "high",
+      createdAt: "2026-01-01T08:00",
+      sortOrder: 4,
+    });
+    const earlierAdd = makeTask({
+      id: 7,
+      priority: "high",
+      createdAt: "2026-01-01T08:00",
+      sortOrder: 2,
+    });
+
+    expect(sortTasks([laterAdd, legacy, earlierAdd]).map((task) => task.id)).toEqual([5, 7, 6]);
+  });
+});
+
+describe("sortTasks（列排序）", () => {
+  it("按优先级升序 / 降序，且不再把已完成单独后置", () => {
+    const doneHigh = makeTask({
+      id: 1,
+      status: "done",
+      priority: "high",
+      createdAt: "2025-01-01T08:00",
+    });
+    const todoLow = makeTask({ id: 2, priority: "low", createdAt: "2026-01-01T08:00" });
+    const doingMid = makeTask({
+      id: 3,
+      status: "doing",
+      priority: "mid",
+      createdAt: "2026-02-01T08:00",
+    });
+    const tasks = [doneHigh, todoLow, doingMid];
+
+    expect(
+      sortTasks(tasks, { field: "priority", direction: "asc" }).map((task) => task.id),
+    ).toEqual([1, 3, 2]);
+    expect(
+      sortTasks(tasks, { field: "priority", direction: "desc" }).map((task) => task.id),
+    ).toEqual([2, 3, 1]);
+  });
+
+  it("按开始时间升降序，未记录时间的任务始终排在最后", () => {
+    const early = makeTask({ id: 1, startAt: "2026-01-01T08:00" });
+    const late = makeTask({ id: 2, startAt: "2026-03-01T08:00" });
+    const none = makeTask({ id: 3, startAt: null });
+
+    expect(
+      sortTasks([late, none, early], { field: "start", direction: "asc" }).map((task) => task.id),
+    ).toEqual([1, 2, 3]);
+    expect(
+      sortTasks([early, none, late], { field: "start", direction: "desc" }).map((task) => task.id),
+    ).toEqual([2, 1, 3]);
+  });
+
+  it("排序值相同时回退到创建时间与添加顺序", () => {
+    const later = makeTask({ id: 1, createdAt: "2026-02-01T08:00", sortOrder: 5 });
+    const earlier = makeTask({ id: 2, createdAt: "2026-01-01T08:00", sortOrder: 9 });
+    const sameMinute = makeTask({ id: 3, createdAt: "2026-02-01T08:00", sortOrder: 2 });
+
+    expect(
+      sortTasks([later, earlier, sameMinute], { field: "created", direction: "desc" }).map(
+        (task) => task.id,
+      ),
+    ).toEqual([3, 1, 2]);
+  });
+});
+
+describe("sortParentCandidates", () => {
+  it("未完成 / 进行中在前，已完成在后；同状态内按创建时间升序", () => {
+    const doneEarly = makeTask({ id: 1, status: "done", createdAt: "2026-01-01T08:00", sortOrder: 1 });
+    const todoLate = makeTask({ id: 2, status: "todo", createdAt: "2026-03-01T08:00", sortOrder: 2 });
+    const doingMid = makeTask({ id: 3, status: "doing", createdAt: "2026-02-01T08:00", sortOrder: 3 });
+    const doneLate = makeTask({ id: 4, status: "done", createdAt: "2026-04-01T08:00", sortOrder: 4 });
+    const tasks = [doneEarly, todoLate, doingMid, doneLate];
+    const before = [...tasks];
+
+    expect(sortParentCandidates(tasks).map((task) => task.id)).toEqual([3, 2, 1, 4]);
+    expect(tasks).toEqual(before);
+  });
+
+  it("创建时间相同（或未记录）时按添加顺序，再按 id", () => {
+    const later = makeTask({ id: 5, createdAt: "2026-02-01T08:00", sortOrder: 9 });
+    const earlier = makeTask({ id: 6, createdAt: "2026-02-01T08:00", sortOrder: 3 });
+    const legacy = makeTask({ id: 7, createdAt: null, sortOrder: 1 });
+
+    expect(sortParentCandidates([later, earlier, legacy]).map((task) => task.id)).toEqual([
+      7, 6, 5,
+    ]);
   });
 });
 

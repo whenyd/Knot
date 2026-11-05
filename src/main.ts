@@ -26,11 +26,14 @@ import {
   resolveTarget,
   scopeLabel,
   selectScope,
+  sortParentCandidates,
   sortTasks,
   taskMatchesFilters,
   type Group,
   type Scope,
+  type SortField,
   type TaskFilters,
+  type TaskSort,
 } from "./grouping";
 import { initTooltips } from "./tooltip";
 import appIcon from "../src-tauri/icons/icon.png";
@@ -85,6 +88,8 @@ interface State {
   /** 顶部筛选在本次会话内保留，切换范围或项目时不重置。 */
   statusFilter: Set<Status>;
   priorityFilter: Set<Priority>;
+  /** 表头列排序；null = 默认（状态 → 优先级 → 创建时间）。 */
+  sort: TaskSort | null;
 }
 
 const state: State = {
@@ -101,6 +106,7 @@ const state: State = {
   collapsedTasks: new Set(),
   statusFilter: new Set(["todo", "doing"]),
   priorityFilter: new Set(PRIORITY_ORDER),
+  sort: null,
 };
 
 /** 内联子任务输入框的草稿：放在状态对象外，无关重绘也不丢正在打的字。 */
@@ -146,6 +152,8 @@ function icon(name: string, className = "icon"): SVGSVGElement {
 }
 
 const dom = {
+  sidebar: must<HTMLElement>("sidebar"),
+  sidebarResizer: must<HTMLElement>("sidebar-resizer"),
   todoSection: must<HTMLElement>("todo-section"),
   projectHeading: must<HTMLElement>("project-heading"),
   scopeSection: must<HTMLElement>("scope-section"),
@@ -156,6 +164,7 @@ const dom = {
   windowMax: must<HTMLButtonElement>("window-max"),
   windowClose: must<HTMLButtonElement>("window-close"),
   grid: must<HTMLTableElement>("grid"),
+  gridScroll: must<HTMLElement>("grid-scroll"),
   body: must<HTMLTableSectionElement>("grid-body"),
   empty: must<HTMLParagraphElement>("empty"),
   taskForm: must<HTMLFormElement>("task-form"),
@@ -485,11 +494,16 @@ function currentFixedWidths(): Record<FixedColumn, number> {
   return widths;
 }
 
-/** 固定列按当前宽度落位，「任务」列补满剩余空间；窗口变窄时任务列不低于最小值。 */
+/**
+ * 固定列按当前宽度落位，「任务」列补满剩余空间；窗口变窄时任务列不低于最小值。
+ *
+ * 可用宽度取自滚动容器而不是表格本身：表格宽度由列宽撑开，读 `grid.clientWidth`
+ * 会形成“表格不缩→任务列不缩→表格更不缩”的死循环，窗口缩小时只剩横向滚动。
+ */
 function applyColumnWidths(): void {
   const widths = currentFixedWidths();
   const fixedTotal = FIXED_COLUMNS.reduce((sum, key) => sum + widths[key], 0);
-  titleColumnWidth = Math.max(COLUMN_MIN.title, dom.grid.clientWidth - fixedTotal);
+  titleColumnWidth = Math.max(COLUMN_MIN.title, dom.gridScroll.clientWidth - fixedTotal);
 
   for (const key of FIXED_COLUMNS) {
     const col = columnElement(key);
@@ -670,6 +684,157 @@ function initColumnResizing(): void {
 }
 
 // ---------------------------------------------------------------------------
+// 左栏宽度
+// ---------------------------------------------------------------------------
+
+const SIDEBAR_STORAGE_KEY = "knot.sidebarWidth.v1";
+const SIDEBAR_DEFAULT_WIDTH = 280;
+const SIDEBAR_MIN_WIDTH = 180;
+const SIDEBAR_MAX_WIDTH = 420;
+
+/** 主区至少留 360px；窗口变窄时上限跟着收。 */
+function sidebarMaxWidth(): number {
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - 360));
+}
+
+/** 应用宽度并返回实际夹紧后的值。 */
+function applySidebarWidth(width: number): number {
+  const clamped = Math.round(
+    Math.min(sidebarMaxWidth(), Math.max(SIDEBAR_MIN_WIDTH, width)),
+  );
+  dom.sidebar.style.flex = `0 0 ${clamped}px`;
+  dom.sidebarResizer.setAttribute("aria-valuemin", String(SIDEBAR_MIN_WIDTH));
+  dom.sidebarResizer.setAttribute("aria-valuemax", String(sidebarMaxWidth()));
+  dom.sidebarResizer.setAttribute("aria-valuenow", String(clamped));
+  // 左栏变宽 / 变窄也会改变表格可用宽度，任务列要跟着重算。
+  applyColumnWidths();
+  return clamped;
+}
+
+function saveSidebarWidth(width: number): void {
+  try {
+    localStorage.setItem(SIDEBAR_STORAGE_KEY, String(width));
+  } catch {
+    // 存不下就只在本会话生效。
+  }
+}
+
+function readSidebarWidth(): number {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_STORAGE_KEY);
+    const value = raw === null ? Number.NaN : Number.parseFloat(raw);
+    return Number.isFinite(value) ? value : SIDEBAR_DEFAULT_WIDTH;
+  } catch {
+    return SIDEBAR_DEFAULT_WIDTH;
+  }
+}
+
+function beginSidebarResize(event: PointerEvent): void {
+  if (event.button !== 0) return;
+  event.preventDefault();
+
+  const startX = event.clientX;
+  const startWidth = dom.sidebar.getBoundingClientRect().width;
+  let lastWidth = startWidth;
+
+  const onMove = (moveEvent: PointerEvent): void => {
+    lastWidth = applySidebarWidth(startWidth + moveEvent.clientX - startX);
+  };
+
+  const finish = (): void => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    document.body.classList.remove("col-resizing");
+    dom.sidebarResizer.classList.remove("is-active");
+    saveSidebarWidth(lastWidth);
+  };
+
+  dom.sidebarResizer.classList.add("is-active");
+  document.body.classList.add("col-resizing");
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+
+function initSidebarResizing(): void {
+  applySidebarWidth(readSidebarWidth());
+  dom.sidebarResizer.addEventListener("pointerdown", beginSidebarResize);
+  dom.sidebarResizer.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const delta = event.key === "ArrowRight" ? 16 : -16;
+    const width = applySidebarWidth(dom.sidebar.getBoundingClientRect().width + delta);
+    saveSidebarWidth(width);
+  });
+  window.addEventListener("resize", () => {
+    applySidebarWidth(dom.sidebar.getBoundingClientRect().width);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 列排序
+// ---------------------------------------------------------------------------
+
+const SORTABLE_FIELDS: readonly SortField[] = ["priority", "created", "start", "end"];
+
+const SORT_LABELS: Record<SortField, string> = {
+  priority: "优先级",
+  created: "创建时间",
+  start: "开始时间",
+  end: "结束时间",
+};
+
+/** 列名右侧按钮：升序 → 降序 → 恢复默认排序。 */
+function cycleColumnSort(field: SortField): void {
+  const current = state.sort;
+  if (current === null || current.field !== field) {
+    state.sort = { field, direction: "asc" };
+  } else if (current.direction === "asc") {
+    state.sort = { field, direction: "desc" };
+  } else {
+    state.sort = null;
+  }
+  render();
+}
+
+function initColumnSorting(): void {
+  for (const button of dom.grid.querySelectorAll<HTMLButtonElement>(".sort-btn")) {
+    const field = button.dataset.sort as SortField | undefined;
+    if (field === undefined || !SORTABLE_FIELDS.includes(field)) continue;
+    button.addEventListener("click", () => cycleColumnSort(field));
+  }
+}
+
+/** 箭头、提示与 `aria-sort` 跟着 state.sort 走。 */
+function renderSortIndicators(): void {
+  for (const button of dom.grid.querySelectorAll<HTMLButtonElement>(".sort-btn")) {
+    const field = button.dataset.sort as SortField | undefined;
+    if (field === undefined) continue;
+
+    const direction = state.sort?.field === field ? state.sort.direction : null;
+    const label = SORT_LABELS[field];
+    button.textContent = direction === "asc" ? "▲" : direction === "desc" ? "▼" : "⇅";
+    button.classList.toggle("is-active", direction !== null);
+
+    const hint =
+      direction === "asc"
+        ? `${label}升序，点击切换为降序`
+        : direction === "desc"
+          ? `${label}降序，点击恢复默认排序`
+          : `按${label}升序排序`;
+    button.title = hint;
+    button.setAttribute("aria-label", hint);
+    button
+      .closest("th")
+      ?.setAttribute(
+        "aria-sort",
+        direction === "asc" ? "ascending" : direction === "desc" ? "descending" : "none",
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 加载
 // ---------------------------------------------------------------------------
 
@@ -758,12 +923,13 @@ function pruneSubtaskInput(): void {
 
 function render(): void {
   // 表格用当前容器的任务；左栏树始终展示项目上下文（切到「我的待办」时也保留）。
-  const groups = buildGroups(state.tasks, state.modules);
+  const groups = buildGroups(state.tasks, state.modules, state.sort);
   const sidebarGroups =
     state.projectId !== null ? buildGroups(state.projectTasks, state.modules) : groups;
   renderSidebar(sidebarGroups);
   renderToolbar(groups);
   renderTable(groups);
+  renderSortIndicators();
   // 数据量变化可能让纵向滚动条出现 / 消失，任务列的剩余宽度要跟着重算。
   applyColumnWidths();
 }
@@ -1098,7 +1264,7 @@ function toggleFilter(kind: FilterKind, value: string): void {
     ?.focus();
 }
 
-/** 子任务按父任务归桶；桶内与组内父任务同一套排序（优先级 → 添加顺序）。 */
+/** 子任务按父任务归桶；桶内与组内父任务同一套排序（状态 → 优先级 → 创建时间）。 */
 function groupChildren(tasks: readonly Task[]): Map<number, Task[]> {
   const map = new Map<number, Task[]>();
   for (const task of tasks) {
@@ -1107,7 +1273,7 @@ function groupChildren(tasks: readonly Task[]): Map<number, Task[]> {
     if (bucket) bucket.push(task);
     else map.set(task.parentTaskId, [task]);
   }
-  for (const [parentId, children] of map) map.set(parentId, sortTasks(children));
+  for (const [parentId, children] of map) map.set(parentId, sortTasks(children, state.sort));
   return map;
 }
 
@@ -1118,7 +1284,10 @@ function renderTable(groups: Group[]): void {
 
   // 「我的待办」没有模块，也就没有分组行：表格直接平铺。
   if (state.container.kind === "todo") {
-    const parents = sortTasks(state.tasks.filter((task) => task.parentTaskId === null));
+    const parents = sortTasks(
+      state.tasks.filter((task) => task.parentTaskId === null),
+      state.sort,
+    );
     for (const task of parents) {
       renderTaskTree(task, childrenByParent.get(task.id) ?? [], dom.body, filters);
     }
@@ -1328,7 +1497,7 @@ function demoteTargetItem(task: Task, target: Task): MenuItem {
 }
 
 function demoteGroupItem(task: Task, group: Group): MenuItem | null {
-  const tasks = sortTasks(group.tasks.filter((candidate) => candidate.id !== task.id));
+  const tasks = sortParentCandidates(group.tasks.filter((candidate) => candidate.id !== task.id));
   const children = group.children
     .map((child) => demoteGroupItem(task, child))
     .filter((child): child is MenuItem => child !== null);
@@ -1360,7 +1529,7 @@ function openDemoteMenu(task: Task, position: MenuPosition): void {
 
   const items =
     state.container.kind === "todo"
-      ? sortTasks(targets).map((target) => demoteTargetItem(task, target))
+      ? sortParentCandidates(targets).map((target) => demoteTargetItem(task, target))
       : buildGroups(state.tasks, state.modules)
           .map((group) => demoteGroupItem(task, group))
           .filter((item): item is MenuItem => item !== null);
@@ -2483,7 +2652,9 @@ function boot(): void {
   dom.projectBtn.addEventListener("click", openProjectMenu);
   dom.aboutBtn.addEventListener("click", openAboutDialog);
   initTooltips();
+  initSidebarResizing();
   initColumnResizing();
+  initColumnSorting();
   render();
   void reload();
 }

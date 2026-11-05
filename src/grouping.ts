@@ -21,12 +21,90 @@ export function filterTasks(tasks: readonly Task[], filters: TaskFilters): Task[
   return tasks.filter((task) => taskMatchesFilters(task, filters));
 }
 
-/** 组内排序：优先级 高 → 中 → 低，同优先级按添加顺序（新的在下）。 */
+/** 优先级排序值：高 → 中 → 低。 */
 const PRIORITY_RANK: Record<Priority, number> = { high: 0, mid: 1, low: 2 };
 
-export function sortTasks(tasks: readonly Task[]): Task[] {
+/** 未记录创建时间的旧任务视为最早；字符串是 `YYYY-MM-DDTHH:MM`，可直接比较。 */
+function compareCreatedAt(a: Task, b: Task): number {
+  const aTime = a.createdAt ?? "";
+  const bTime = b.createdAt ?? "";
+  if (aTime === bTime) return 0;
+  return aTime < bTime ? -1 : 1;
+}
+
+function doneRank(task: Task): number {
+  return task.status === "done" ? 1 : 0;
+}
+
+/** 表头可点的排序列。 */
+export type SortField = "priority" | "created" | "start" | "end";
+export type SortDirection = "asc" | "desc";
+
+/** `null` 表示默认排序：状态 → 优先级 → 创建时间。 */
+export interface TaskSort {
+  field: SortField;
+  direction: SortDirection;
+}
+
+/** 未记录的时间不论升降序都排在有值之后。 */
+function compareTime(a: string | null, b: string | null, direction: number): number {
+  if (a === null || b === null) {
+    if (a === b) return 0;
+    return a === null ? 1 : -1;
+  }
+  const cmp = a < b ? -1 : a > b ? 1 : 0;
+  return cmp * direction;
+}
+
+function compareField(a: Task, b: Task, field: SortField, direction: number): number {
+  switch (field) {
+    case "priority":
+      return (PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]) * direction;
+    case "created":
+      return compareTime(a.createdAt, b.createdAt, direction);
+    case "start":
+      return compareTime(a.startAt, b.startAt, direction);
+    case "end":
+      return compareTime(a.endAt, b.endAt, direction);
+  }
+}
+
+/**
+ * 组内排序。
+ *
+ * 没有列排序时：未完成 / 进行中一组在前，已完成一组在后；两组内部按优先级
+ * → 创建时间。
+ * 选了一列时：整组按该列排序（不再分已完成），同值再按创建时间 / 添加顺序。
+ */
+export function sortTasks(tasks: readonly Task[], sort: TaskSort | null = null): Task[] {
+  const direction = sort?.direction === "desc" ? -1 : 1;
+  return [...tasks].sort((a, b) => {
+    if (sort !== null) {
+      const primary = compareField(a, b, sort.field, direction);
+      if (primary !== 0) return primary;
+      return compareCreatedAt(a, b) || a.sortOrder - b.sortOrder || a.id - b.id;
+    }
+    return (
+      doneRank(a) - doneRank(b) ||
+      PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] ||
+      compareCreatedAt(a, b) ||
+      a.sortOrder - b.sortOrder ||
+      a.id - b.id
+    );
+  });
+}
+
+/**
+ * 「降为子任务」的候选父任务排序：未完成 / 进行中在前，已完成在后；
+ * 同一状态内按创建时间升序（未记录创建时间的旧任务按最早已有任务处理）。
+ */
+export function sortParentCandidates(tasks: readonly Task[]): Task[] {
   return [...tasks].sort(
-    (a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.sortOrder - b.sortOrder,
+    (a, b) =>
+      doneRank(a) - doneRank(b) ||
+      compareCreatedAt(a, b) ||
+      a.sortOrder - b.sortOrder ||
+      a.id - b.id,
   );
 }
 
@@ -59,7 +137,11 @@ export interface Group {
  * 任务归属优先级：`submoduleId` > `moduleId` > 默认。子任务不单独成组，
  * 由渲染器跟在父任务下面（本切片还不建子任务）。
  */
-export function buildGroups(tasks: readonly Task[], modules: readonly Module[]): Group[] {
+export function buildGroups(
+  tasks: readonly Task[],
+  modules: readonly Module[],
+  sort: TaskSort | null = null,
+): Group[] {
   const store = new Map<string, Task[]>();
   const push = (key: string, task: Task) => {
     const bucket = store.get(key);
@@ -74,7 +156,7 @@ export function buildGroups(tasks: readonly Task[], modules: readonly Module[]):
     else push("unclassified", task);
   }
 
-  const take = (key: string) => sortTasks(store.get(key) ?? []);
+  const take = (key: string) => sortTasks(store.get(key) ?? [], sort);
 
   // 「默认」是派生分组，空时不占一行；未归类任务最需要先看到，所以排在模块之前。
   const groups: Group[] = [];

@@ -189,7 +189,7 @@
 
       <div class="workspace">
         <!-- 左栏：「我的待办」恒在最上；当前项目名下面是模块/子模块树。 -->
-        <aside class="sidebar">
+        <aside class="sidebar" id="sidebar">
           <nav class="side-group" id="todo-section"></nav>
 
           <div class="side-heading" id="project-heading" hidden></div>
@@ -201,8 +201,18 @@
           </button>
         </aside>
 
+        <!-- 左栏宽度把手：零宽占位，10px 的可拖区域跨在左栏边框两侧。 -->
+        <div
+          class="sidebar-resizer"
+          id="sidebar-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整左栏宽度"
+          tabindex="0"
+        ></div>
+
         <main class="main">
-          <div class="grid-scroll">
+          <div class="grid-scroll" id="grid-scroll">
             <table class="grid" id="grid">
               <colgroup>
                 <col data-col="status" style="width: 44px" />
@@ -221,17 +231,17 @@
                   <th data-col="title">
                     任务<span class="col-resizer" data-boundary="title:priority"></span>
                   </th>
-                  <th data-col="priority">
-                    优先级<span class="col-resizer" data-boundary="priority:created"></span>
+                  <th data-col="priority" aria-sort="none">
+                    优先级<button class="sort-btn" type="button" data-sort="priority" aria-label="按优先级排序" title="按优先级排序">⇅</button><span class="col-resizer" data-boundary="priority:created"></span>
                   </th>
-                  <th data-col="created">
-                    创建<span class="col-resizer" data-boundary="created:start"></span>
+                  <th data-col="created" aria-sort="none">
+                    创建<button class="sort-btn" type="button" data-sort="created" aria-label="按创建时间排序" title="按创建时间排序">⇅</button><span class="col-resizer" data-boundary="created:start"></span>
                   </th>
-                  <th data-col="start">
-                    开始<span class="col-resizer" data-boundary="start:end"></span>
+                  <th data-col="start" aria-sort="none">
+                    开始<button class="sort-btn" type="button" data-sort="start" aria-label="按开始时间排序" title="按开始时间排序">⇅</button><span class="col-resizer" data-boundary="start:end"></span>
                   </th>
-                  <th data-col="end">
-                    结束<span class="col-resizer" data-boundary="end:note"></span>
+                  <th data-col="end" aria-sort="none">
+                    结束<button class="sort-btn" type="button" data-sort="end" aria-label="按结束时间排序" title="按结束时间排序">⇅</button><span class="col-resizer" data-boundary="end:note"></span>
                   </th>
                   <th data-col="note">备注</th>
                 </tr>
