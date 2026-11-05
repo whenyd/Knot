@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="230" fill="#3574F0"/>
+  <!-- 绳：竖笔 -->
+  <path d="M400 200V824" fill="none" stroke="#FFFFFF" stroke-width="96" stroke-linecap="round"/>
+  <!-- 结：两臂连成一根绳，从竖笔前方绕过；底色缝隙做上下压关系 -->
+  <path d="M676 248 L340 512 L676 776" fill="none" stroke="#3574F0" stroke-width="128" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M676 248 L340 512 L676 776" fill="none" stroke="#FFFFFF" stroke-width="96" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
