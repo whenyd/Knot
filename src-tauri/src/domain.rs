@@ -934,31 +934,41 @@ struct ParentChange {
 
 /// 事件触发的父状态推导，只在父状态**真的被改写**时返回 `Some`。
 ///
-/// 规则按字面实现：子任务全为 `done` → 父置 `done`；否则且父当前为 `done`
-/// → 父置 `doing`；其余情况不动。零个子任务时 `all()` 为真，所以删除最后一个
-/// 未完成子任务也会把父任务推到已完成——这是规格明确的推导结果，不是不变式。
+/// 规则按字面实现：子任务全为 `done` → 父置 `done`；否则只要有子任务进入
+/// `doing` 或 `done` → 父置 `doing`；子任务全为 `todo` → 父置 `todo`。
+/// 零个子任务时 `all()` 为真，所以删除最后一个未完成子任务也会把父任务推到
+/// 已完成——这是规格明确的推导结果，不是不变式。
 fn aggregate_parent_status(conn: &Connection, parent_id: i64) -> Res<Option<ParentChange>> {
     let mut parent = load_task(conn, parent_id)?;
     let children = load_children(conn, parent_id)?;
     let all_done = children.iter().all(|child| child.status == Status::Done);
+    let any_started = children.iter().any(|child| child.status != Status::Todo);
+    let was_done = parent.status == Status::Done;
 
     let next = if all_done {
-        if parent.status == Status::Done {
+        if was_done {
             return Ok(None);
         }
         Status::Done
-    } else {
-        if parent.status != Status::Done {
+    } else if any_started {
+        if parent.status == Status::Doing {
             return Ok(None);
         }
         Status::Doing
+    } else {
+        if parent.status == Status::Todo {
+            return Ok(None);
+        }
+        Status::Todo
     };
 
     write_status(conn, &mut parent, next, &now_local())?;
     let notice = match next {
         Status::Done => "父任务已自动标记为已完成".to_string(),
-        Status::Doing => "父任务已恢复为进行中".to_string(),
-        Status::Todo => unreachable!("聚合只会写 done / doing"),
+        Status::Doing if was_done => "父任务已恢复为进行中".to_string(),
+        Status::Doing => "父任务已自动标记为进行中".to_string(),
+        Status::Todo if was_done => "父任务已恢复为未完成".to_string(),
+        Status::Todo => "父任务已自动标记为未完成".to_string(),
     };
 
     Ok(Some(ParentChange {
@@ -2053,9 +2063,9 @@ mod tests {
         assert_eq!(create_child(&conn, &second, "c").task.sort_order, 0);
     }
 
-    /// 事件触发 1：在已完成的父任务下新增未完成子任务 → 父退回进行中。
+    /// 事件触发 1：在已完成的父任务下新增未完成子任务 → 父退回未完成。
     #[test]
-    fn creating_subtask_on_done_parent_reopens_it_with_notice() {
+    fn creating_subtask_on_done_parent_resets_it_to_todo_with_notice() {
         let conn = conn();
         let parent = seed_task(&conn);
         apply_set_status(&conn, parent.id, Status::Done, false).unwrap();
@@ -2063,12 +2073,9 @@ mod tests {
         let created = create_child(&conn, &parent, "新子任务");
 
         assert_eq!(created.notices.len(), 1);
-        assert_eq!(created.notices[0], "父任务已恢复为进行中");
+        assert_eq!(created.notices[0], "父任务已恢复为未完成");
         assert_eq!(created.task.status.as_str(), "todo");
-        assert_eq!(
-            load_task(&conn, parent.id).unwrap().status.as_str(),
-            "doing"
-        );
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
     }
 
     #[test]
@@ -2091,8 +2098,12 @@ mod tests {
         let second = create_child(&conn, &parent, "子任务二").task;
 
         let outcome = apply_set_status(&conn, first.id, Status::Done, false).unwrap();
-        assert!(outcome.notices.is_empty(), "还有未完成子任务，父不动");
-        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
+        assert_eq!(outcome.notices.len(), 1);
+        assert_eq!(outcome.notices[0], "父任务已自动标记为进行中");
+        assert_eq!(
+            load_task(&conn, parent.id).unwrap().status.as_str(),
+            "doing"
+        );
 
         let outcome = apply_set_status(&conn, second.id, Status::Done, false).unwrap();
         assert_eq!(outcome.notices.len(), 1);
@@ -2103,8 +2114,9 @@ mod tests {
         assert_eq!(aggregated.status.as_str(), "done");
     }
 
+    /// 非最后一个子任务完成时父任务不提前完成，但要从 todo 推到 doing。
     #[test]
-    fn non_last_child_done_leaves_parent_alone() {
+    fn non_last_child_done_marks_parent_doing_with_notice() {
         let conn = conn();
         let parent = seed_task(&conn);
         let first = create_child(&conn, &parent, "子任务一").task;
@@ -2112,8 +2124,32 @@ mod tests {
 
         let outcome = apply_set_status(&conn, first.id, Status::Done, false).unwrap();
 
-        assert!(outcome.notices.is_empty());
-        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
+        assert_eq!(outcome.notices.len(), 1);
+        assert_eq!(outcome.notices[0], "父任务已自动标记为进行中");
+        assert_eq!(
+            load_task(&conn, parent.id).unwrap().status.as_str(),
+            "doing"
+        );
+    }
+
+    /// 第一个子任务进入进行中时，父任务从 todo 自动变为 doing。
+    #[test]
+    fn child_doing_marks_todo_parent_doing_with_notice() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let child = create_child(&conn, &parent, "子任务").task;
+
+        let outcome = apply_set_status(&conn, child.id, Status::Doing, false).unwrap();
+
+        assert_eq!(outcome.notices.len(), 1);
+        assert_eq!(outcome.notices[0], "父任务已自动标记为进行中");
+        assert_eq!(
+            load_task(&conn, parent.id).unwrap().status.as_str(),
+            "doing"
+        );
+        let aggregated = outcome.changed.last().expect("自动改动的父任务也要带回");
+        assert_eq!(aggregated.id, parent.id);
+        assert_eq!(aggregated.status.as_str(), "doing");
     }
 
     /// 子任务退回：父若已完成 → 退回进行中；其他子任务不动。
@@ -2139,16 +2175,21 @@ mod tests {
     }
 
     #[test]
-    fn child_revert_with_unfinished_sibling_does_not_touch_parent() {
+    fn child_reopen_with_all_todo_children_resets_parent_to_todo() {
         let conn = conn();
         let parent = seed_task(&conn);
         let first = create_child(&conn, &parent, "子任务一").task;
         create_child(&conn, &parent, "子任务二");
         apply_set_status(&conn, first.id, Status::Done, false).unwrap();
+        assert_eq!(
+            load_task(&conn, parent.id).unwrap().status.as_str(),
+            "doing"
+        );
 
-        let outcome = apply_set_status(&conn, first.id, Status::Doing, false).unwrap();
+        let outcome = apply_set_status(&conn, first.id, Status::Todo, false).unwrap();
 
-        assert!(outcome.notices.is_empty());
+        assert_eq!(outcome.notices.len(), 1);
+        assert_eq!(outcome.notices[0], "父任务已自动标记为未完成");
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
     }
 
@@ -2607,23 +2648,24 @@ mod tests {
         assert_local_time(&parent_after.end_at);
     }
 
-    /// 子任务被退回导致父任务自动恢复进行中：清结束时间，保留开始时间。
+    /// 子任务被退回导致所有子任务都未完成：父任务回到 todo，两项时间都清空。
     #[test]
-    fn aggregate_reopen_clears_parent_end_and_keeps_start() {
+    fn aggregate_reopen_resets_parent_to_todo_and_clears_times() {
         let conn = conn();
         let parent = seed_task(&conn);
         let child = create_child(&conn, &parent, "子任务").task;
 
         apply_set_status(&conn, parent.id, Status::Doing, false).unwrap();
-        let start = load_task(&conn, parent.id).unwrap().start_at;
+        assert_local_time(&load_task(&conn, parent.id).unwrap().start_at);
         apply_set_status(&conn, child.id, Status::Done, false).unwrap();
         assert_local_time(&load_task(&conn, parent.id).unwrap().end_at);
 
-        apply_set_status(&conn, child.id, Status::Todo, false).unwrap();
+        let outcome = apply_set_status(&conn, child.id, Status::Todo, false).unwrap();
 
+        assert_eq!(outcome.notices[0], "父任务已恢复为未完成");
         let reopened = load_task(&conn, parent.id).unwrap();
-        assert_eq!(reopened.status.as_str(), "doing");
-        assert_eq!(reopened.start_at, start);
+        assert_eq!(reopened.status.as_str(), "todo");
+        assert_eq!(reopened.start_at, None);
         assert_eq!(reopened.end_at, None);
     }
 

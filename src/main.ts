@@ -1397,7 +1397,7 @@ async function cycleStatus(task: Task): Promise<void> {
       const confirmed = await askConfirm({
         title: `标记为${STATUS_LABELS[next]}？`,
         body: plan.reason,
-        confirmText: `一并完成 ${plan.affects.length - 1} 个`,
+        confirmText: "确定",
       });
       if (!confirmed) return;
       cascade = true;
