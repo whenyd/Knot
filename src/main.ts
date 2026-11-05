@@ -147,6 +147,10 @@ const dom = {
   scopeSection: must<HTMLElement>("scope-section"),
   projectBtn: must<HTMLButtonElement>("project-btn"),
   filters: must<HTMLElement>("filters"),
+  titlebarDrag: must<HTMLElement>("titlebar-drag"),
+  windowMin: must<HTMLButtonElement>("window-min"),
+  windowMax: must<HTMLButtonElement>("window-max"),
+  windowClose: must<HTMLButtonElement>("window-close"),
   grid: must<HTMLTableElement>("grid"),
   body: must<HTMLTableSectionElement>("grid-body"),
   empty: must<HTMLParagraphElement>("empty"),
@@ -225,6 +229,51 @@ function initTheme(): void {
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
     if (readThemeMode() === "system") applyTheme("system");
   });
+}
+
+type AppPlatform = "windows" | "macos" | "linux";
+
+/** macOS 用原生红绿灯；Windows 用顶栏里的自绘按钮；Linux 保留系统标题栏。 */
+function detectPlatform(): AppPlatform {
+  const ua = navigator.userAgent;
+  if (/Macintosh|Mac OS X/i.test(ua)) return "macos";
+  if (/Linux/i.test(ua) && !/Android/i.test(ua)) return "linux";
+  return "windows";
+}
+
+async function initWindowControls(): Promise<void> {
+  const platform = detectPlatform();
+  const isTauri = "__TAURI_INTERNALS__" in window;
+  document.documentElement.dataset.platform = platform;
+  document.documentElement.dataset.tauri = isTauri ? "true" : "false";
+  if (platform !== "windows" || !isTauri) return;
+
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const appWindow = getCurrentWindow();
+    const maxIcon = dom.windowMax.querySelector("use");
+
+    const syncMaximized = async () => {
+      const maximized = await appWindow.isMaximized();
+      maxIcon?.setAttribute("href", maximized ? "#i-restore" : "#i-maximize");
+      const label = maximized ? "还原" : "最大化";
+      dom.windowMax.title = label;
+      dom.windowMax.setAttribute("aria-label", label);
+    };
+
+    dom.windowMin.addEventListener("click", () => void appWindow.minimize());
+    dom.windowMax.addEventListener("click", () => void appWindow.toggleMaximize());
+    dom.windowClose.addEventListener("click", () => void appWindow.close());
+    dom.titlebarDrag.addEventListener("dblclick", () => void appWindow.toggleMaximize());
+
+    await syncMaximized();
+    await appWindow.onResized(() => {
+      void syncMaximized();
+    });
+  } catch (error) {
+    // 浏览器里跑 Vite 时没有 Tauri 运行时，按钮只作为静态预览。
+    console.warn("窗口控制初始化失败", error);
+  }
 }
 
 function readSavedProjectId(): number | null {
@@ -2356,6 +2405,9 @@ function boot(): void {
     event.preventDefault();
   });
   initTheme();
+  void initWindowControls();
+  // 拖拽区会先被 Tauri 的拖动逻辑拦截，菜单的全局 mousedown 收不到；这里用捕获阶段先收起。
+  dom.titlebarDrag.addEventListener("mousedown", () => closeMenu(), true);
   dom.projectBtn.addEventListener("click", openProjectMenu);
   initTooltips();
   initColumnResizing();

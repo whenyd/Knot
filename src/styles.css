@@ -1335,10 +1335,69 @@ body {
   color: var(--accent);
 }
 
+/* 顶栏兼作 Windows 标题栏；拖动由 Tauri 的 data-tauri-drag-region 处理。
+   不要加 app-region: drag，它会把空白区的点击从 DOM 事件流里吞掉。 */
+.titlebar-drag {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 8px;
+}
+
+.window-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-self: stretch;
+  margin-right: -8px;
+}
+
+/* 浏览器里跑 Vite 时没有窗口 API，不显示无作用的按钮。 */
+html:not([data-tauri="true"]) .window-controls {
+  display: none;
+}
+
+.window-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 38px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.window-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.window-btn.close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.window-btn .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* macOS 使用原生红绿灯，不显示自绘按钮；Linux 保留系统标题栏。 */
+html[data-platform="macos"] .topbar {
+  padding-left: 78px;
+}
+
+html[data-platform="macos"] .window-controls,
+html[data-platform="linux"] .window-controls {
+  display: none;
+}
+
 .topbar .filter-groups {
   flex-wrap: nowrap;
   gap: 18px;
-  margin-left: auto;
+  margin-left: 0;
+  min-width: 0;
 }
 
 .topbar .filter-group {
@@ -1874,7 +1933,7 @@ button.group-caret.has-icon::before {
   color: var(--danger);
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .topbar {
     gap: 8px;
   }
