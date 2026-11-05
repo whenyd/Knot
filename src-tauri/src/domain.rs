@@ -956,8 +956,8 @@ fn aggregate_parent_status(conn: &Connection, parent_id: i64) -> Res<Option<Pare
 
     write_status(conn, &mut parent, next, &now_local())?;
     let notice = match next {
-        Status::Done => format!("父任务「{}」已自动标记为已完成", parent.title),
-        Status::Doing => format!("父任务「{}」已恢复为进行中", parent.title),
+        Status::Done => "父任务已自动标记为已完成".to_string(),
+        Status::Doing => "父任务已恢复为进行中".to_string(),
         Status::Todo => unreachable!("聚合只会写 done / doing"),
     };
 
@@ -2063,11 +2063,7 @@ mod tests {
         let created = create_child(&conn, &parent, "新子任务");
 
         assert_eq!(created.notices.len(), 1);
-        assert!(
-            created.notices[0].contains("恢复为进行中"),
-            "{:?}",
-            created.notices
-        );
+        assert_eq!(created.notices[0], "父任务已恢复为进行中");
         assert_eq!(created.task.status.as_str(), "todo");
         assert_eq!(
             load_task(&conn, parent.id).unwrap().status.as_str(),
@@ -2100,11 +2096,7 @@ mod tests {
 
         let outcome = apply_set_status(&conn, second.id, Status::Done, false).unwrap();
         assert_eq!(outcome.notices.len(), 1);
-        assert!(
-            outcome.notices[0].contains("已完成"),
-            "{:?}",
-            outcome.notices
-        );
+        assert_eq!(outcome.notices[0], "父任务已自动标记为已完成");
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
         let aggregated = outcome.changed.last().expect("自动改动的父任务也要带回");
         assert_eq!(aggregated.id, parent.id);
@@ -2138,11 +2130,7 @@ mod tests {
         let outcome = apply_set_status(&conn, first.id, Status::Todo, false).unwrap();
 
         assert_eq!(outcome.notices.len(), 1);
-        assert!(
-            outcome.notices[0].contains("恢复为进行中"),
-            "{:?}",
-            outcome.notices
-        );
+        assert_eq!(outcome.notices[0], "父任务已恢复为进行中");
         assert_eq!(
             load_task(&conn, parent.id).unwrap().status.as_str(),
             "doing"
@@ -2194,7 +2182,7 @@ mod tests {
             .expect("空子任务集合应触发聚合");
 
         assert_eq!(change.task.status.as_str(), "done");
-        assert!(change.notice.contains("已完成"), "{}", change.notice);
+        assert_eq!(change.notice, "父任务已自动标记为已完成");
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
     }
 
@@ -2231,11 +2219,7 @@ mod tests {
         let outcome = delete_task(&conn, child.id).unwrap();
 
         assert_eq!(outcome.notices.len(), 1);
-        assert!(
-            outcome.notices[0].contains("已完成"),
-            "{:?}",
-            outcome.notices
-        );
+        assert_eq!(outcome.notices[0], "父任务已自动标记为已完成");
         assert!(load_task(&conn, child.id).is_err());
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
     }

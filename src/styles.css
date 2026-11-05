@@ -662,6 +662,30 @@ button.note:focus-visible {
   border-color: var(--accent);
 }
 
+/* ---------------------------------------------------------------- 悬停提示 */
+
+/* 原生 title 的边框和圆角由系统画，这里换成自定义浮层：1px 细边、4px 小圆角 */
+.hover-tip {
+  position: fixed;
+  z-index: 50;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  box-shadow: 0 2px 8px rgb(15 23 42 / 12%);
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+  pointer-events: none;
+}
+
+.hover-tip[hidden] {
+  display: none;
+}
+
 /* ---------------------------------------------------------------- 轻提示 */
 
 .notice {
@@ -671,15 +695,15 @@ button.note:focus-visible {
   max-width: 60vw;
   padding: 8px 14px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #111827;
+  border-radius: 4px;
+  background: var(--bg);
   box-shadow: 0 4px 14px rgb(0 0 0 / 14%);
-  color: #fff;
-  font-size: 14px;
+  color: var(--fg);
+  font-size: 13px;
 }
 
 .notice[data-kind="error"] {
-  background: var(--danger);
+  border-color: var(--danger);
 }
 
 /* 拖动列宽时浮出的两列宽度，证明两侧是一起变化的。 */
@@ -687,11 +711,12 @@ button.note:focus-visible {
   position: fixed;
   z-index: 40;
   padding: 3px 8px;
-  border-radius: 6px;
-  background: #111827;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
   box-shadow: 0 4px 14px rgb(0 0 0 / 14%);
-  color: #fff;
-  font-size: 12px;
+  color: var(--fg);
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
   white-space: nowrap;
@@ -745,6 +770,18 @@ button.note:focus-visible {
   outline: none;
   font: inherit;
   font-size: 13px;
+}
+
+/* 父任务改名时：输入框从原标题位置铺到单元格右侧，计数和「＋」暂时让位 */
+.task-title-row .title-input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.task-title-row.is-renaming .task-count,
+.task-title-row.is-renaming .subtask-add {
+  display: none;
 }
 
 /* 改优先级 / 移动后行会跳到新位置，短暂闪一下背景，让人跟得上（持续 1 秒） */

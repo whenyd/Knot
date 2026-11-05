@@ -32,6 +32,7 @@ import {
   type Scope,
   type TaskFilters,
 } from "./grouping";
+import { initTooltips } from "./tooltip";
 
 /** 数据库起不来时，后端通过这个 query 参数把原因交给前端。 */
 const STARTUP_ERROR_PARAM = "startupError";
@@ -189,6 +190,16 @@ const COLUMN_LABELS: Record<ResizableColumn, string> = {
   priority: "优先级",
   note: "备注",
 };
+/** 与 index.html 的 col / th 顺序保持一致，拖动时按这个顺序向两侧找空间。 */
+const COLUMN_ORDER: readonly ResizableColumn[] = [
+  "status",
+  "title",
+  "priority",
+  "created",
+  "start",
+  "end",
+  "note",
+];
 const COLUMN_STORAGE_KEY = "todolist.columnWidths.v1";
 
 let fixedWidths: Record<FixedColumn, number> | null = null;
@@ -259,12 +270,64 @@ function saveColumnWidths(): void {
   }
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
-}
-
 function columnWidthOf(key: ResizableColumn, widths: Record<FixedColumn, number>): number {
   return key === "title" ? titleColumnWidth : widths[key as FixedColumn];
+}
+
+/** 当前所有列的显示宽度，拖动开始时取一次快照，后续位移都基于它计算。 */
+function columnWidthsSnapshot(): Record<ResizableColumn, number> {
+  const fixed = currentFixedWidths();
+  const out = {} as Record<ResizableColumn, number>;
+  for (const key of COLUMN_ORDER) out[key] = columnWidthOf(key, fixed);
+  return out;
+}
+
+function applyWidths(widths: Record<ResizableColumn, number>): void {
+  for (const key of COLUMN_ORDER) {
+    const col = columnElement(key);
+    if (col) col.style.width = `${widths[key]}px`;
+  }
+  titleColumnWidth = widths.title;
+}
+
+/**
+ * 把一次水平位移分给分界线两侧：
+ * - 向右拖：线右侧从近到远依次让出空间，直到最小宽度；左侧只增加右侧真正让出的量。
+ * - 向左拖：线左侧从近到远依次让出空间；右侧只增加左侧真正让出的量。
+ * 这样某一侧已经到最小宽度时，会自然带动同侧更远的列，而不是把线卡死。
+ */
+function cascadeWidths(
+  start: Record<ResizableColumn, number>,
+  boundary: number,
+  delta: number,
+): { widths: Record<ResizableColumn, number>; applied: number } {
+  const widths = { ...start };
+  let remaining = Math.abs(delta);
+
+  if (delta > 0) {
+    for (let i = boundary; i < COLUMN_ORDER.length && remaining > 0; i += 1) {
+      const key = COLUMN_ORDER[i];
+      const take = Math.min(widths[key] - COLUMN_MIN[key], remaining);
+      if (take <= 0) continue;
+      widths[key] -= take;
+      remaining -= take;
+    }
+  } else if (delta < 0) {
+    for (let i = boundary - 1; i >= 0 && remaining > 0; i -= 1) {
+      const key = COLUMN_ORDER[i];
+      const take = Math.min(widths[key] - COLUMN_MIN[key], remaining);
+      if (take <= 0) continue;
+      widths[key] -= take;
+      remaining -= take;
+    }
+  }
+
+  const applied = Math.abs(delta) - remaining;
+  if (applied > 0) {
+    if (delta > 0) widths[COLUMN_ORDER[boundary - 1]] += applied;
+    else widths[COLUMN_ORDER[boundary]] += applied;
+  }
+  return { widths, applied };
 }
 
 function columnHeader(key: ResizableColumn): HTMLElement | null {
@@ -283,10 +346,10 @@ function showResizeTip(
   event: PointerEvent,
   left: ResizableColumn,
   right: ResizableColumn,
-  widths: Record<FixedColumn, number>,
+  widths: Record<ResizableColumn, number>,
 ): void {
-  const leftWidth = Math.round(columnWidthOf(left, widths));
-  const rightWidth = Math.round(columnWidthOf(right, widths));
+  const leftWidth = Math.round(widths[left]);
+  const rightWidth = Math.round(widths[right]);
   dom.resizeTip.textContent = `${COLUMN_LABELS[left]} ${leftWidth}px · ${COLUMN_LABELS[right]} ${rightWidth}px`;
   dom.resizeTip.hidden = false;
   const leftPosition = Math.min(
@@ -306,25 +369,17 @@ function beginColumnResize(
   event.preventDefault();
   event.stopPropagation();
 
-  const widths = currentFixedWidths();
+  const startWidths = columnWidthsSnapshot();
+  const boundary = COLUMN_ORDER.indexOf(right);
+  if (boundary <= 0 || COLUMN_ORDER[boundary - 1] !== left) return;
+
   const startX = event.clientX;
-  const startLeft = columnWidthOf(left, widths);
-  const startRight = columnWidthOf(right, widths);
+  let lastWidths = startWidths;
 
   const onMove = (moveEvent: PointerEvent): void => {
-    const delta = moveEvent.clientX - startX;
-    if (left === "title") {
-      const next = clamp(delta, COLUMN_MIN.title - startLeft, startRight - COLUMN_MIN[right]);
-      widths[right as FixedColumn] = startRight - next;
-    } else if (right === "title") {
-      const next = clamp(delta, COLUMN_MIN[left] - startLeft, startRight - COLUMN_MIN.title);
-      widths[left] = startLeft + next;
-    } else {
-      const next = clamp(delta, COLUMN_MIN[left] - startLeft, startRight - COLUMN_MIN[right]);
-      widths[left] = startLeft + next;
-      widths[right] = startRight - next;
-    }
-    applyColumnWidths();
+    const { widths } = cascadeWidths(startWidths, boundary, moveEvent.clientX - startX);
+    lastWidths = widths;
+    applyWidths(widths);
     showResizeTip(moveEvent, left, right, widths);
   };
 
@@ -335,12 +390,16 @@ function beginColumnResize(
     document.body.classList.remove("col-resizing");
     dom.resizeTip.hidden = true;
     highlightColumns(left, right, false);
+
+    const fixed = currentFixedWidths();
+    for (const key of FIXED_COLUMNS) fixed[key] = lastWidths[key];
+    applyColumnWidths();
     saveColumnWidths();
   };
 
   document.body.classList.add("col-resizing");
   highlightColumns(left, right, true);
-  showResizeTip(event, left, right, widths);
+  showResizeTip(event, left, right, startWidths);
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", finish);
   window.addEventListener("pointercancel", finish);
@@ -348,6 +407,7 @@ function beginColumnResize(
 
 /**
  * 表头每一条分界线都是拖动把手：拖动时同时改变线两侧的列，总宽度不变；
+ * 一侧到最小宽度后继续拖动，会按列顺序带动同侧更远的列。
  * 悬停时两侧表头一起变色，拖动时浮出两列当前宽度，避免“只动了其中一列”的错觉。
  */
 function initColumnResizing(): void {
@@ -356,7 +416,7 @@ function initColumnResizing(): void {
     const boundary = handle.dataset.boundary?.split(":");
     if (!boundary || boundary.length !== 2) continue;
     const [left, right] = boundary as [ResizableColumn, ResizableColumn];
-    handle.title = "拖动同时调整两侧列宽";
+    handle.title = "拖动调整列宽（到最小后带动相邻列）";
     handle.addEventListener("pointerdown", (event) => beginColumnResize(event, left, right));
 
     const highlight = (on: boolean): void => {
@@ -1027,7 +1087,7 @@ function renderTitleCell(task: Task, options: TaskRowOptions): HTMLTableCellElem
   const cell = el("td", "cell-title");
   const title = el("span", "task-title", task.title);
   title.title = "双击改名";
-  title.addEventListener("dblclick", () => beginRename(cell, task));
+  title.addEventListener("dblclick", () => beginRename(title, task));
 
   // 子任务到头了：没有箭头、没有「＋」，只靠缩进表达层级。
   if (options.isChild) {
@@ -1345,6 +1405,11 @@ async function cycleStatus(task: Task): Promise<void> {
 
     const outcome = await api.applySetStatus(task.id, next, cascade);
     await reload();
+    // 「已完成」未勾选时，任务完成会立刻离开视图；先说明它去哪了，别让操作看起来没生效。
+    const stillVisible = document.querySelector(`tr[data-task-id="${task.id}"]`) !== null;
+    if (next === "done" && !stillVisible) {
+      showNotice("任务已完成，已从当前视图隐藏");
+    }
     for (const notice of outcome.notices) showNotice(notice);
   } catch (error) {
     showNotice(describe(error), "error");
@@ -1398,14 +1463,20 @@ async function applyPriority(task: Task, priority: Priority): Promise<void> {
   }
 }
 
-/** 就地改名：单元格原位换成输入框，回车存、Esc 取消。 */
-function beginRename(cell: HTMLTableCellElement, task: Task): void {
-  if (cell.querySelector(".title-input")) return;
+/** 就地改名：只替换标题本身，父任务的箭头、计数和「＋」留在原位。 */
+function beginRename(title: HTMLSpanElement, task: Task): void {
+  const cell = title.closest<HTMLTableCellElement>("td");
+  if (!cell || cell.querySelector(".title-input")) return;
 
   const input = el("input", "title-input");
   input.value = task.title;
   input.spellcheck = false;
-  cell.replaceChildren(input);
+  // 父任务的标题在 flex 行里：输入框从标题原位铺到单元格右侧，计数和「＋」先让位。
+  const row = title.parentElement;
+  if (row?.classList.contains("task-title-row")) {
+    row.classList.add("is-renaming");
+  }
+  title.replaceWith(input);
   input.focus();
   input.select();
 
@@ -1792,8 +1863,8 @@ async function deleteTaskFlow(task: Task): Promise<void> {
     const extra = plan.taskCount - 1;
     const body =
       extra > 0
-        ? `「${task.title}」连同 ${extra} 个子任务会被删除，无法撤销。`
-        : `「${task.title}」会被删除，无法撤销。`;
+        ? `这个任务连同 ${extra} 个子任务会被删除，无法撤销。`
+        : "这个任务会被删除，无法撤销。";
 
     const confirmed = await askConfirm({ title: "删除任务？", body, confirmText: "删除" });
     if (!confirmed) return;
@@ -1975,7 +2046,7 @@ function drainNotices(): void {
       noticeActive = false;
       drainNotices();
     },
-    next.kind === "error" ? 8000 : 3000,
+    2000,
   );
 }
 
@@ -2037,6 +2108,7 @@ function boot(): void {
   document.addEventListener("contextmenu", (event) => {
     event.preventDefault();
   });
+  initTooltips();
   initColumnResizing();
   render();
   void reload();
