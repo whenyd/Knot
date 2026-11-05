@@ -37,6 +37,13 @@
   --success: #369650;
   --status-doing: #f59e0b;
 
+  /* 改优先级 / 移动后行短暂高亮：浅色用暖黄，深色用低亮度琥珀，避免刺眼并保住文字对比 */
+  --flash-bg: #fef3c7;
+
+  /* 列宽分界线悬停：两侧表头底色 + 把手竖线；深色要压低亮度 */
+  --resize-neighbor-bg: #eef4ff;
+  --resize-line: var(--accent);
+
   /* 旧选择器还在用的别名 */
   --fg: var(--text);
   --muted: var(--text-2);
@@ -78,6 +85,9 @@
   --warning-soft: #3a2f1f;
   --neutral-soft: #33363a;
   --success: #57965c;
+  --flash-bg: #4a3a1e;
+  --resize-neighbor-bg: #25324d;
+  --resize-line: #3d6bb3;
 }
 
 * {
@@ -357,18 +367,12 @@ body {
   white-space: nowrap;
 }
 
-/* 列与列之间常驻一条细线：分割线在哪里要一眼看得出。 */
-.grid thead th:not(:last-child) {
-  border-right: 1px solid var(--line);
-}
-
-.grid tbody td:not(:last-child) {
-  border-right: 1px solid var(--line-soft);
-}
+/* 表格不画单元格框线：列与列的边界只靠对齐和留白区分，
+   拖动把手仍按列边界分布，悬停 / 拖动时才浮出竖线。 */
 
 /* 悬停 / 拖动时把分界线两侧的表头一起点亮，表示这次会同时改两列。 */
 .grid thead th.is-resize-neighbor {
-  background: #eef4ff;
+  background: var(--resize-neighbor-bg);
 }
 
 .grid thead th.is-resizing {
@@ -401,7 +405,7 @@ body {
 
 .col-resizer:hover::after,
 .col-resizer.is-active::after {
-  background: var(--accent);
+  background: var(--resize-line);
 }
 
 body.col-resizing {
@@ -411,7 +415,6 @@ body.col-resizing {
 
 .grid td {
   padding: 6px 10px;
-  border-bottom: 1px solid var(--line-soft);
   vertical-align: middle;
 }
 
@@ -419,11 +422,9 @@ body.col-resizing {
   background: #f7f9fb;
 }
 
-/* 分组行：模块与子模块不占列，位置即分类 */
+/* 分组行：模块与子模块不占列，位置即分类；不画上下框线，靠底色区分 */
 .row-group > td,
 .row-subgroup > td {
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line-soft);
   background: var(--bg-group);
   font-weight: 600;
 }
@@ -856,7 +857,7 @@ button.note:focus-visible {
 
 @keyframes flash-move {
   from {
-    background: #fef3c7;
+    background: var(--flash-bg);
   }
   to {
     background: transparent;
@@ -867,13 +868,13 @@ button.note:focus-visible {
    时长由 JS 定时摘 class，动画本身关掉。 */
 .row-task.just-moved-long > td {
   animation: none;
-  background: #fef3c7;
+  background: var(--flash-bg);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .row-task.just-moved > td {
     animation: none;
-    background: #fef3c7;
+    background: var(--flash-bg);
   }
 }
 
@@ -1595,7 +1596,6 @@ button.group-caret.has-icon::before {
 .grid tbody td {
   height: 26px;
   padding: 0 10px;
-  border-bottom: 1px solid var(--border-soft);
 }
 
 .grid tbody tr:hover > td {
@@ -1604,8 +1604,6 @@ button.group-caret.has-icon::before {
 
 .row-group > td,
 .row-subgroup > td {
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border-soft);
   background: var(--bg-panel);
 }
 
