@@ -225,6 +225,14 @@ pub struct DeleteOutcome {
     pub notices: Vec<String>,
 }
 
+/// `reparent_task` 的返回：改完层级后的任务 + 父任务被聚合自动改动时的轻提示。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReparentOutcome {
+    pub task: Task,
+    pub notices: Vec<String>,
+}
+
 /// 任务表的列顺序，读任务的地方只有这一份，避免 `row.get(i)` 的序号漂移。
 const TASK_COLUMNS: &str = "id, project_id, module_id, submodule_id, parent_task_id, \
                             title, status, priority, note, sort_order, start_at, end_at, created_at";
@@ -634,6 +642,105 @@ pub fn move_task(conn: &Connection, id: i64, target: MoveTarget) -> Res<Task> {
     task.submodule_id = target.submodule_id;
     task.sort_order = sort_order;
     Ok(task)
+}
+
+/// 父子互转：`Some(target)` 降为目标的子任务，`None` 升为顶层任务。
+///
+/// 只允许一层父子关系。降级目标必须是同一容器里没有父任务的任务，且被降级的
+/// 任务不能带着自己的子任务走——否则会出现孙任务。升级沿用原父任务的归类，
+/// 排到该顶层分组末尾；两种情况都重算受影响的父任务状态。
+pub fn reparent_task(
+    conn: &Connection,
+    id: i64,
+    parent_task_id: Option<i64>,
+) -> Res<ReparentOutcome> {
+    let task = load_task(conn, id)?;
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+
+    let (task, notices) = match parent_task_id {
+        Some(target_id) => {
+            if task.parent_task_id.is_some() {
+                return Err("只有顶层任务可以降为子任务".to_string());
+            }
+            if !load_children(&tx, id)?.is_empty() {
+                return Err("这个任务还有子任务，不能直接降级".to_string());
+            }
+            if target_id == id {
+                return Err("不能把任务降为自己的子任务".to_string());
+            }
+
+            let target = load_task(&tx, target_id)?;
+            if target.parent_task_id.is_some() {
+                return Err("子任务不能再挂子任务".to_string());
+            }
+            if target.project_id != task.project_id {
+                return Err("子任务必须和父任务在同一个容器".to_string());
+            }
+
+            // 子任务不能比父任务更优先，否则排序规则会把它顶到父任务前面。
+            let priority = if task.priority.rank() > target.priority.rank() {
+                target.priority
+            } else {
+                task.priority
+            };
+            let sort_order =
+                next_sort_order(&tx, "task", "parent_task_id = ?1", params![target_id])?;
+
+            tx.execute(
+                "UPDATE task SET parent_task_id = ?1, project_id = ?2, module_id = NULL, \
+                 submodule_id = NULL, priority = ?3, sort_order = ?4 WHERE id = ?5",
+                params![
+                    target_id,
+                    target.project_id,
+                    priority.as_str(),
+                    sort_order,
+                    id
+                ],
+            )
+            .map_err(db_err)?;
+
+            let updated = load_task(&tx, id)?;
+            let notices = aggregate_parent_status(&tx, target_id)?
+                .map(|change| vec![change.notice])
+                .unwrap_or_default();
+            (updated, notices)
+        }
+        None => {
+            let parent_id = task
+                .parent_task_id
+                .ok_or_else(|| "这个任务已经是顶层任务".to_string())?;
+            let parent = load_task(&tx, parent_id)?;
+            let sort_order = next_sort_order(
+                &tx,
+                "task",
+                "project_id IS ?1 AND module_id IS ?2 AND submodule_id IS ?3 \
+                 AND parent_task_id IS NULL",
+                params![parent.project_id, parent.module_id, parent.submodule_id],
+            )?;
+
+            tx.execute(
+                "UPDATE task SET parent_task_id = NULL, project_id = ?1, module_id = ?2, \
+                 submodule_id = ?3, sort_order = ?4 WHERE id = ?5",
+                params![
+                    parent.project_id,
+                    parent.module_id,
+                    parent.submodule_id,
+                    sort_order,
+                    id
+                ],
+            )
+            .map_err(db_err)?;
+
+            let updated = load_task(&tx, id)?;
+            let notices = aggregate_parent_status(&tx, parent_id)?
+                .map(|change| vec![change.notice])
+                .unwrap_or_default();
+            (updated, notices)
+        }
+    };
+
+    tx.commit().map_err(db_err)?;
+    Ok(ReparentOutcome { task, notices })
 }
 
 /// 改状态的第一步：只算“要不要确认”，不写库。
@@ -2895,6 +3002,234 @@ mod tests {
         assert!(error.contains("子任务"), "错误要说清原因：{error}");
         assert_eq!(load_task(&conn, parent.id).unwrap().project_id, None);
         assert_eq!(load_task(&conn, child).unwrap().project_id, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // 父子互转
+    // -----------------------------------------------------------------------
+
+    /// 降级后归属跟着新父任务，两级分类清空，排在目标子任务末尾。
+    #[test]
+    fn demote_appends_under_target_and_clears_classification() {
+        let conn = conn();
+        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let container = Container::Project { id: project_id };
+        let module = create_module(&conn, project_id, "认证").unwrap();
+        let target = create_task(&conn, container, Some(module.id), None, None, "目标父任务")
+            .unwrap()
+            .task;
+        let task = create_task(&conn, container, None, None, None, "待降级")
+            .unwrap()
+            .task;
+        assert_eq!(task.sort_order, 0);
+
+        let outcome = reparent_task(&conn, task.id, Some(target.id)).unwrap();
+
+        assert_eq!(outcome.task.parent_task_id, Some(target.id));
+        assert_eq!(outcome.task.project_id, Some(project_id));
+        assert_eq!(outcome.task.module_id, None, "归属改由父任务表达");
+        assert_eq!(outcome.task.submodule_id, None);
+        assert_eq!(outcome.task.sort_order, 0, "目标是空子任务列表，排第一");
+        assert!(outcome.notices.is_empty(), "目标本来就是未完成");
+
+        let after = load_task(&conn, task.id).unwrap();
+        assert_eq!(after.parent_task_id, Some(target.id));
+        assert_eq!(after.module_id, None);
+    }
+
+    /// 子任务不能比新父任务更优先，降级时压到父任务档位。
+    #[test]
+    fn demote_clamps_priority_to_target() {
+        let conn = conn();
+        let target = seed_task(&conn);
+        let task = seed_task(&conn);
+        set_priority(&conn, target.id, Priority::Low).unwrap();
+        set_priority(&conn, task.id, Priority::High).unwrap();
+
+        let outcome = reparent_task(&conn, task.id, Some(target.id)).unwrap();
+
+        assert_eq!(outcome.task.priority.as_str(), "low");
+        assert_eq!(load_task(&conn, task.id).unwrap().priority.as_str(), "low");
+    }
+
+    /// 带子任务的父任务不能直接降级，否则会出现孙任务。
+    #[test]
+    fn demote_rejects_parent_with_children() {
+        let conn = conn();
+        let target = seed_task(&conn);
+        let parent = seed_task(&conn);
+        let child = create_child(&conn, &parent, "子任务").task;
+
+        let error = reparent_task(&conn, parent.id, Some(target.id)).unwrap_err();
+
+        assert!(error.contains("子任务"), "错误要说清原因：{error}");
+        assert_eq!(load_task(&conn, parent.id).unwrap().parent_task_id, None);
+        assert_eq!(
+            load_task(&conn, child.id).unwrap().parent_task_id,
+            Some(parent.id)
+        );
+    }
+
+    /// 自己、子任务、跨容器和未知目标都拒绝，原任务一个字段都不变。
+    #[test]
+    fn demote_rejects_invalid_targets() {
+        let conn = conn();
+        let a = create_project(&conn, "A").unwrap().id.unwrap();
+        let b = create_project(&conn, "B").unwrap().id.unwrap();
+        let target_a = create_task(
+            &conn,
+            Container::Project { id: a },
+            None,
+            None,
+            None,
+            "A 的父任务",
+        )
+        .unwrap()
+        .task;
+        let target_b = create_task(
+            &conn,
+            Container::Project { id: b },
+            None,
+            None,
+            None,
+            "B 的父任务",
+        )
+        .unwrap()
+        .task;
+        let child = create_child(&conn, &target_a, "A 的子任务").task;
+        let task = create_task(
+            &conn,
+            Container::Project { id: a },
+            None,
+            None,
+            None,
+            "待降级",
+        )
+        .unwrap()
+        .task;
+
+        for (target_id, expected) in [
+            (task.id, "自己"),
+            (child.id, "不能再挂子任务"),
+            (target_b.id, "同一个容器"),
+            (999, "不存在"),
+        ] {
+            let error = reparent_task(&conn, task.id, Some(target_id)).unwrap_err();
+            assert!(error.contains(expected), "{target_id} 应被拒：{error}");
+            let after = load_task(&conn, task.id).unwrap();
+            assert_eq!(after.parent_task_id, None);
+            assert_eq!(after.project_id, Some(a));
+        }
+    }
+
+    /// 降级会重算目标父任务：进行中的子任务把 todo 父任务推到 doing。
+    #[test]
+    fn demote_updates_target_status_with_notice() {
+        let conn = conn();
+        let target = seed_task(&conn);
+        let task = create_task(&conn, Container::Todo, None, None, None, "进行中的任务")
+            .unwrap()
+            .task;
+        apply_set_status(&conn, task.id, Status::Doing, false).unwrap();
+
+        let outcome = reparent_task(&conn, task.id, Some(target.id)).unwrap();
+
+        assert_eq!(
+            load_task(&conn, target.id).unwrap().status.as_str(),
+            "doing"
+        );
+        assert_eq!(outcome.notices, vec!["父任务已自动标记为进行中"]);
+    }
+
+    /// 升级继承原父任务的模块 / 子模块，排到该顶层分组末尾。
+    #[test]
+    fn promote_inherits_parent_placement_and_appends() {
+        let conn = conn();
+        let project_id = create_project(&conn, "todolist-tr").unwrap().id.unwrap();
+        let container = Container::Project { id: project_id };
+        let module = create_module(&conn, project_id, "认证").unwrap();
+        let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
+        let parent = create_task(
+            &conn,
+            container,
+            Some(module.id),
+            Some(submodule.id),
+            None,
+            "原父任务",
+        )
+        .unwrap()
+        .task;
+        let sibling = create_task(
+            &conn,
+            container,
+            Some(module.id),
+            Some(submodule.id),
+            None,
+            "同组已有任务",
+        )
+        .unwrap()
+        .task;
+        let child = create_child(&conn, &parent, "要升级的子任务").task;
+
+        let outcome = reparent_task(&conn, child.id, None).unwrap();
+
+        assert_eq!(outcome.task.parent_task_id, None);
+        assert_eq!(outcome.task.project_id, Some(project_id));
+        assert_eq!(outcome.task.module_id, Some(module.id));
+        assert_eq!(outcome.task.submodule_id, Some(submodule.id));
+        assert_eq!(
+            outcome.task.sort_order,
+            sibling.sort_order + 1,
+            "排在原分组末尾"
+        );
+    }
+
+    /// 唯一子任务被升走后，原父任务按零子任务规则自动完成，并带回提示。
+    #[test]
+    fn promote_only_child_completes_old_parent_with_notice() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let child = create_child(&conn, &parent, "唯一子任务").task;
+
+        let outcome = reparent_task(&conn, child.id, None).unwrap();
+
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
+        assert_eq!(outcome.notices, vec!["父任务已自动标记为已完成"]);
+    }
+
+    /// 升降级只改层级，不改任务自己的状态与时间。
+    #[test]
+    fn reparent_keeps_task_status_and_times() {
+        let conn = conn();
+        let target = seed_task(&conn);
+        let task = create_task(&conn, Container::Todo, None, None, None, "进行中的任务")
+            .unwrap()
+            .task;
+        let doing = apply_set_status(&conn, task.id, Status::Doing, false).unwrap();
+        let start_at = doing.changed[0].start_at.clone();
+
+        reparent_task(&conn, task.id, Some(target.id)).unwrap();
+        let demoted = load_task(&conn, task.id).unwrap();
+        assert_eq!(demoted.status.as_str(), "doing");
+        assert_eq!(demoted.start_at, start_at);
+        assert_eq!(demoted.end_at, None);
+
+        reparent_task(&conn, task.id, None).unwrap();
+        let promoted = load_task(&conn, task.id).unwrap();
+        assert_eq!(promoted.status.as_str(), "doing");
+        assert_eq!(promoted.start_at, start_at);
+        assert_eq!(promoted.end_at, None);
+    }
+
+    #[test]
+    fn promote_rejects_top_level_task() {
+        let conn = conn();
+        let task = seed_task(&conn);
+
+        let error = reparent_task(&conn, task.id, None).unwrap_err();
+
+        assert!(error.contains("已经是顶层任务"), "{error}");
+        assert_eq!(load_task(&conn, task.id).unwrap().parent_task_id, None);
     }
 
     #[test]

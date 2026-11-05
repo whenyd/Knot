@@ -1021,18 +1021,96 @@ function renderTaskRow(task: Task, options: TaskRowOptions): HTMLTableRowElement
   return row;
 }
 
-/** 任务右键菜单：移动（仅顶层任务）与删除。 */
+/** 任务右键菜单：移动 / 升降级（顶层与子任务各一项）与删除。 */
 function openTaskMenu(task: Task, event: MouseEvent): void {
   const items: MenuItem[] = [];
+  const position: MenuPosition = { kind: "point", x: event.clientX, y: event.clientY };
   if (task.parentTaskId === null) {
-    items.push({
-      label: "移动到…",
-      onSelect: () =>
-        void openMoveMenu(task, { kind: "point", x: event.clientX, y: event.clientY }),
-    });
+    items.push({ label: "移动到…", onSelect: () => void openMoveMenu(task, position) });
+    items.push({ label: "降为子任务…", onSelect: () => openDemoteMenu(task, position) });
+  } else {
+    items.push({ label: "升为父任务", onSelect: () => void promoteTask(task) });
   }
   items.push({ label: "删除任务", onSelect: () => void deleteTaskFlow(task) });
-  openMenu({ items, position: { kind: "point", x: event.clientX, y: event.clientY } });
+  openMenu({ items, position });
+}
+
+/** 目标父任务按当前容器的分组展示；子任务不能当父任务。 */
+function demoteTargetItem(task: Task, target: Task): MenuItem {
+  return { label: target.title, onSelect: () => void demoteTaskTo(task, target) };
+}
+
+function demoteGroupItem(task: Task, group: Group): MenuItem | null {
+  const tasks = sortTasks(group.tasks.filter((candidate) => candidate.id !== task.id));
+  const children = group.children
+    .map((child) => demoteGroupItem(task, child))
+    .filter((child): child is MenuItem => child !== null);
+
+  if (tasks.length === 0 && children.length === 0) return null;
+  return {
+    label: group.label,
+    children: [...tasks.map((target) => demoteTargetItem(task, target)), ...children],
+  };
+}
+
+/** 「降为子任务…」的第二级菜单：目标只能是当前容器里的顶层任务。 */
+function openDemoteMenu(task: Task, position: MenuPosition): void {
+  const children = state.tasks.filter((candidate) => candidate.parentTaskId === task.id);
+  if (children.length > 0) {
+    showNotice(
+      `「${task.title}」还有 ${children.length} 个子任务，不能直接降级；请先删除或升为父任务`,
+    );
+    return;
+  }
+
+  const targets = state.tasks.filter(
+    (candidate) => candidate.parentTaskId === null && candidate.id !== task.id,
+  );
+  if (targets.length === 0) {
+    showNotice("没有可挂靠的父任务");
+    return;
+  }
+
+  const items =
+    state.container.kind === "todo"
+      ? sortTasks(targets).map((target) => demoteTargetItem(task, target))
+      : buildGroups(state.tasks, state.modules)
+          .map((group) => demoteGroupItem(task, group))
+          .filter((item): item is MenuItem => item !== null);
+
+  openMenu({ items, position, label: "降为子任务" });
+}
+
+/** 降级成功才重画；目标折叠着就先展开，让新子任务能被看到。 */
+async function demoteTaskTo(task: Task, target: Task): Promise<void> {
+  const clamped = PRIORITY_ORDER.indexOf(task.priority) < PRIORITY_ORDER.indexOf(target.priority);
+  try {
+    const outcome = await api.reparentTask(task.id, target.id);
+    state.collapsedTasks.delete(target.id);
+    await reload();
+    flashTaskTree(target.id);
+    showNotice(
+      clamped
+        ? `已将「${task.title}」降为「${target.title}」的子任务，优先级调整为${PRIORITY_LABELS[target.priority]}`
+        : `已将「${task.title}」降为「${target.title}」的子任务`,
+    );
+    for (const notice of outcome.notices) showNotice(notice);
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
+}
+
+/** 升级成功才重画；原父任务若被聚合改动，提示由后端带回。 */
+async function promoteTask(task: Task): Promise<void> {
+  try {
+    const outcome = await api.reparentTask(task.id, null);
+    await reload();
+    flashTaskTree(task.id);
+    showNotice(`已将「${task.title}」升为父任务`);
+    for (const notice of outcome.notices) showNotice(notice);
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
 }
 
 /**

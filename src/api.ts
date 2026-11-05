@@ -96,6 +96,12 @@ export interface DeleteOutcome {
   notices: string[];
 }
 
+/** `reparent_task` 的返回：改完层级后的任务 + 父任务被自动改动时的轻提示。 */
+export interface ReparentOutcome {
+  task: Task;
+  notices: string[];
+}
+
 export const api = {
   listProjects: () => invoke<Project[]>("list_projects"),
   createProject: (name: string) => invoke<Project>("create_project", { name }),
@@ -118,6 +124,9 @@ export const api = {
   renameTask: (id: number, title: string) => invoke<Task>("rename_task", { id, title }),
   setNote: (id: number, note: string) => invoke<Task>("set_note", { id, note }),
   moveTask: (id: number, target: MoveTarget) => invoke<Task>("move_task", { id, target }),
+  /** `parentTaskId` 为 null 表示升为顶层任务；否则降为该父任务的子任务。 */
+  reparentTask: (id: number, parentTaskId: number | null) =>
+    invoke<ReparentOutcome>("reparent_task", { id, parentTaskId }),
   setPriority: (id: number, priority: Priority) =>
     invoke<Task>("set_priority", { id, priority }),
   /** 第一步：只算要不要确认，不写库。 */

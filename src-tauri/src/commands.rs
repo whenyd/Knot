@@ -7,7 +7,7 @@ use tauri::State;
 use crate::db::Db;
 use crate::domain::{
     self, Container, DeleteOutcome, DeletePlan, Module, MoveTarget, NodeKind, Priority, Project,
-    Status, StatusOutcome, StatusPlan, Submodule, Task, TaskCreated,
+    ReparentOutcome, Status, StatusOutcome, StatusPlan, Submodule, Task, TaskCreated,
 };
 
 #[tauri::command]
@@ -91,6 +91,15 @@ pub fn set_note(db: State<'_, Db>, id: i64, note: String) -> Result<Task, String
 #[tauri::command]
 pub fn move_task(db: State<'_, Db>, id: i64, target: MoveTarget) -> Result<Task, String> {
     domain::move_task(&db.conn(), id, target)
+}
+
+#[tauri::command]
+pub fn reparent_task(
+    db: State<'_, Db>,
+    id: i64,
+    parent_task_id: Option<i64>,
+) -> Result<ReparentOutcome, String> {
+    domain::reparent_task(&db.conn(), id, parent_task_id)
 }
 
 #[tauri::command]
