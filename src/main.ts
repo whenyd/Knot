@@ -43,7 +43,7 @@ const APP_VERSION = "0.1.0";
 
 // 状态是三态**循环**：一个字段一个控件，点一下换下一个值。
 const NEXT_STATUS: Record<Status, Status> = { todo: "doing", doing: "done", done: "todo" };
-const STATUS_LABELS: Record<Status, string> = { todo: "未完成", doing: "进行中", done: "已完成" };
+const STATUS_LABELS: Record<Status, string> = { todo: "未开始", doing: "进行中", done: "已完成" };
 const STATUS_ORDER: Status[] = ["todo", "doing", "done"];
 
 // 优先级是浮窗选择：三档都摆出来，不用循环着找。
@@ -1422,7 +1422,7 @@ function renderStatusCell(task: Task): HTMLTableCellElement {
   const cell = el("td", "cell-status");
   const button = el("button", `status status-${task.status}`);
   button.type = "button";
-  button.title = `${STATUS_LABELS[task.status]} → 点一下改为${STATUS_LABELS[NEXT_STATUS[task.status]]}`;
+  button.title = `${STATUS_LABELS[task.status]}，点一下改为${STATUS_LABELS[NEXT_STATUS[task.status]]}`;
   button.setAttribute("aria-label", `状态：${STATUS_LABELS[task.status]}`);
   button.append(
     icon(
@@ -1834,7 +1834,8 @@ async function applyPriority(task: Task, priority: Priority): Promise<void> {
     await api.setPriority(task.id, priority);
     await reload();
     if (cascaded > 0) showNotice(`已同步下调 ${cascaded} 个子任务的优先级`);
-    flashTaskTree(task.id);
+    // 父任务改档位时整棵树会重排，多闪一秒让人跟住新位置。
+    flashTaskTree(task.id, task.parentTaskId === null);
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -1897,16 +1898,26 @@ async function commitRename(task: Task, title: string): Promise<void> {
   }
 }
 
-/** 改完优先级 / 移动完成后，让跳走的父任务和跟着走的子任务行一起闪一下。 */
-function flashTaskTree(taskId: number): void {
+/**
+ * 改完优先级 / 移动完成后，让跳走的父任务和跟着走的子任务行一起闪一下。
+ *
+ * `long` 用于父任务改优先级：整棵树连同子任务会一起换位置，1 秒太快，
+ * 改成静态高亮 2 秒才跟得上。
+ */
+function flashTaskTree(taskId: number, long = false): void {
   const ids = [
     taskId,
     ...state.tasks.filter((task) => task.parentTaskId === taskId).map((task) => task.id),
   ];
   for (const id of ids) {
-    dom.body
-      .querySelector<HTMLTableRowElement>(`tr[data-task-id="${id}"]`)
-      ?.classList.add("just-moved");
+    const row = dom.body.querySelector<HTMLTableRowElement>(`tr[data-task-id="${id}"]`);
+    if (!row) continue;
+    row.classList.add("just-moved");
+    if (long) {
+      row.classList.add("just-moved-long");
+      // 静态高亮不会自己淡出，到点把 class 摘掉；行若已被重画则这段是空操作。
+      window.setTimeout(() => row.classList.remove("just-moved-long"), 2000);
+    }
   }
 }
 

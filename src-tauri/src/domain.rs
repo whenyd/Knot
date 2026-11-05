@@ -1074,8 +1074,8 @@ fn aggregate_parent_status(conn: &Connection, parent_id: i64) -> Res<Option<Pare
         Status::Done => "父任务已自动标记为已完成".to_string(),
         Status::Doing if was_done => "父任务已恢复为进行中".to_string(),
         Status::Doing => "父任务已自动标记为进行中".to_string(),
-        Status::Todo if was_done => "父任务已恢复为未完成".to_string(),
-        Status::Todo => "父任务已自动标记为未完成".to_string(),
+        Status::Todo if was_done => "父任务已恢复为未开始".to_string(),
+        Status::Todo => "父任务已自动标记为未开始".to_string(),
     };
 
     Ok(Some(ParentChange {
@@ -2180,7 +2180,7 @@ mod tests {
         let created = create_child(&conn, &parent, "新子任务");
 
         assert_eq!(created.notices.len(), 1);
-        assert_eq!(created.notices[0], "父任务已恢复为未完成");
+        assert_eq!(created.notices[0], "父任务已恢复为未开始");
         assert_eq!(created.task.status.as_str(), "todo");
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
     }
@@ -2296,7 +2296,7 @@ mod tests {
         let outcome = apply_set_status(&conn, first.id, Status::Todo, false).unwrap();
 
         assert_eq!(outcome.notices.len(), 1);
-        assert_eq!(outcome.notices[0], "父任务已自动标记为未完成");
+        assert_eq!(outcome.notices[0], "父任务已自动标记为未开始");
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
     }
 
@@ -2769,7 +2769,7 @@ mod tests {
 
         let outcome = apply_set_status(&conn, child.id, Status::Todo, false).unwrap();
 
-        assert_eq!(outcome.notices[0], "父任务已恢复为未完成");
+        assert_eq!(outcome.notices[0], "父任务已恢复为未开始");
         let reopened = load_task(&conn, parent.id).unwrap();
         assert_eq!(reopened.status.as_str(), "todo");
         assert_eq!(reopened.start_at, None);

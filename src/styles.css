@@ -863,6 +863,13 @@ button.note:focus-visible {
   }
 }
 
+/* 父任务改优先级：整棵树会一起换位置，静态高亮 2 秒更好认。
+   时长由 JS 定时摘 class，动画本身关掉。 */
+.row-task.just-moved-long > td {
+  animation: none;
+  background: #fef3c7;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .row-task.just-moved > td {
     animation: none;
@@ -1981,6 +1988,12 @@ button.group-caret.has-icon::before {
 
 .btn-primary:hover {
   background: color-mix(in srgb, var(--accent) 86%, #000);
+}
+
+/* 弹窗一打开就把焦点放在确认键上，空格即确认；这时不该冒出系统那圈黑色焦点框 */
+.modal-actions .btn:focus,
+.modal-actions .btn:focus-visible {
+  outline: none;
 }
 
 .modal-input,
