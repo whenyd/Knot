@@ -56,6 +56,11 @@ export interface Task {
   status: Status;
   priority: Priority;
   note: string;
+  /** 本地时间 `YYYY-MM-DDTHH:MM`；新建时写入，升级前的任务为 null。 */
+  createdAt: string | null;
+  /** 本地时间 `YYYY-MM-DDTHH:MM`，null = 未记录；由状态变化自动维护。 */
+  startAt: string | null;
+  endAt: string | null;
   sortOrder: number;
 }
 

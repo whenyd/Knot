@@ -23,6 +23,9 @@ function makeTask({ id, ...overrides }: Partial<Task> & Pick<Task, "id">): Task 
     status: "todo",
     priority: "mid",
     note: "",
+    createdAt: null,
+    startAt: null,
+    endAt: null,
     sortOrder: 0,
     ...overrides,
   };

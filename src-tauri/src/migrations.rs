@@ -11,6 +11,8 @@ pub const MIGRATIONS: &[&str] = &[
     V1_INITIAL_SCHEMA,
     V2_TASK_CLASSIFICATION_CASCADE,
     V3_CLAMP_SUBTASK_PRIORITY,
+    V4_TASK_SCHEDULE,
+    V5_TASK_CREATED_AT,
 ];
 
 /// v1：项目 / 模块 / 子模块 / 任务，两层分类 + 一层子任务。
@@ -110,6 +112,20 @@ WHERE parent_task_id IS NOT NULL
     FROM task AS parent
     WHERE parent.id = task.parent_task_id
   );
+"#;
+
+/// v4：任务增加开始 / 结束时间。两列都可空，存本地时间字符串
+/// `YYYY-MM-DDTHH:MM`（格式与 HTML `datetime-local` 一致，按文本可比较）。
+/// 已有任务升级后两列为 NULL，表示未设置。
+const V4_TASK_SCHEDULE: &str = r#"
+ALTER TABLE task ADD COLUMN start_at TEXT;
+ALTER TABLE task ADD COLUMN end_at   TEXT;
+"#;
+
+/// v5：任务增加创建时间。可空：升级前的任务不知道创建时刻，保持 NULL；
+/// 之后新建的任务由 `domain::create_task` 写入本地时间 `YYYY-MM-DDTHH:MM`。
+const V5_TASK_CREATED_AT: &str = r#"
+ALTER TABLE task ADD COLUMN created_at TEXT;
 "#;
 
 /// 库当前已应用到第几条迁移。`0` 表示全新库。
@@ -345,6 +361,48 @@ mod tests {
                 (6, "mid".to_string()),
             ]
         );
+    }
+
+    /// v4 只加两列：老任务保留，时间默认未设置。
+    #[test]
+    fn v4_adds_empty_schedule_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+        conn.execute_batch("INSERT INTO task (id, title) VALUES (1, '旧任务');")
+            .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let schedule: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT start_at, end_at FROM task WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(schedule, (None, None), "升级后的任务时间应为未设置");
+    }
+
+    /// v5 只加创建时间列：老任务不知道创建时刻，保持 NULL。
+    #[test]
+    fn v5_adds_empty_created_at() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+        conn.execute_batch("INSERT INTO task (id, title) VALUES (1, '旧任务');")
+            .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let created_at: Option<String> = conn
+            .query_row("SELECT created_at FROM task WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(created_at, None, "升级前的任务不伪造创建时间");
     }
 
     /// 外键校验在事务内：有悬空引用时整段回滚，user_version 不变、新表不留下。

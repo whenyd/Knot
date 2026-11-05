@@ -45,6 +45,7 @@ npm run tauri build                        # release 安装包（NSIS / MSI；�
 
 - 「我的待办」不是一条项目记录，而是 `task.project_id IS NULL`。
 - 分类是 `project → module → submodule`；子任务只有一层（`parent_task_id`），且子任务不存 `module_id`/`submodule_id`——归属真相在父任务，后端拒绝“子任务挂子任务”。
+- 任务带 `created_at` / `start_at` / `end_at`（本地时间文本 `YYYY-MM-DDTHH:MM`，未记录即 `NULL`），**都不手动编辑**：`create_task` 写一次创建时间；`domain.rs` 的 `write_status` 在改状态时维护开始 / 结束——进进行中记开始、进已完成记结束、退回未完成清空。时间只展示，不参与排序、筛选与计数。
 - 删除一律“删父带走子”：项目/模块/子模块/父任务的外键都是 `CASCADE`。删除模块时组内任务是真删，不是退回默认（D1 已定）。
 - 迁移用 `PRAGMA user_version`，`MIGRATIONS: &[&str]` 顺序执行。**已发布的条目一个字都不要改**（v1 把分类外键写成 `SET NULL` 的历史无法修改，v2 靠“建新表→拷贝→删旧表→改名”改成 `CASCADE`）。只写前进，不写 down。
 - 迁移整段包在单个事务里；事务前关 `foreign_keys`（事务内是 no-op），`PRAGMA foreign_key_check` 在**提交之前**跑，失败连 `user_version` 一起回滚。每个连接打开时显式 `PRAGMA foreign_keys = ON`。
@@ -54,7 +55,8 @@ npm run tauri build                        # release 安装包（NSIS / MSI；�
 
 - `main.ts` 持有唯一一份可变 `state`（`container` / `scope` / `collapsedNodes` 等），所有渲染都是“全量状态 → 重建 DOM”，没有框架、没有双向绑定。
 - `grouping.ts` 是纯函数数据管线：`sortTasks` → `buildGroups` → `selectScope` → `countGroup`；同一棵树同时供左栏范围树计数和表格分组，不建第二份。**分组计数只算父任务**（子任务跟随父任务渲染，不单独成组）。阶段 5 的筛选只作用于渲染，计数仍基于未筛选数据；父任务不命中但子任务命中时，父行灰显为上下文。
-- `menu.ts` 是唯一的菜单实现（弹出/定位/关闭/键盘导航/子面板），三处共用：左栏右键菜单、任务行尾「…」、优先级浮窗。新增菜单不要另写一套。
+- `menu.ts` 是唯一的菜单实现（弹出/定位/关闭/键盘导航/子面板），三处共用：左栏右键菜单、任务行右键菜单、优先级浮窗。任务行的移动与删除只在右键菜单里；新增菜单不要另写一套。
+- 列宽在 `main.ts` 里维护：列间有常驻分割线；拖动表头分界线**同时调整两侧列**，悬停两侧表头高亮、拖动时浮出两列宽度；「任务」列吃掉剩余宽度；非任务列宽存 `localStorage`。
 - 弹窗（`askConfirm` / `askText` / `askNote`）共用同一套 modal，**同一时刻只允许一个**——新弹窗会把上一个按取消收场，否则两个 `await` 抢同一批监听。
 - 新建项目是唯一的非弹窗输入形态，只有一个收尾出口 `resetProjectForm()`；打开时挂 `document` 监听，关闭时摘掉。
 - 删除后的回落：删模块/子模块时若 `scope` 在被删子树内 → 回项目「全部」；删项目时若正停在该项目 → 回「我的待办」。

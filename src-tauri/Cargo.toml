@@ -20,6 +20,8 @@ serde = { version = "1", features = ["derive"] }
 # `bundled` 把 SQLite 源码编进二进制：不再依赖系统里有没有 sqlite3.dll，
 # 安装包也因此自带确定的 SQLite 版本。
 rusqlite = { version = "0.41", features = ["bundled"] }
+# 只在 `domain.rs` 里取一次本地时间（状态变化时自动记开始 / 结束）。
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]
 # 只用于验证 IPC 上的字段名契约（camelCase / 枚举值），不进发布二进制。

@@ -17,7 +17,7 @@ import {
   type Status,
   type Task,
 } from "./api";
-import { closeMenu, openMenu, type MenuItem } from "./menu";
+import { closeMenu, openMenu, type MenuItem, type MenuPosition } from "./menu";
 import {
   buildGroups,
   countGroup,
@@ -44,6 +44,20 @@ const STATUS_ORDER: Status[] = ["todo", "doing", "done"];
 // 优先级是浮窗选择：三档都摆出来，不用循环着找。
 const PRIORITY_ORDER: Priority[] = ["high", "mid", "low"];
 const PRIORITY_LABELS: Record<Priority, string> = { high: "高", mid: "中", low: "低" };
+
+/** 三列时间共用一套文案：创建时间在新建时写入，开始 / 结束随状态变化。 */
+type TimeField = "created" | "start" | "end";
+const TIME_LABELS: Record<TimeField, string> = { created: "创建", start: "开始", end: "结束" };
+const TIME_HINTS: Record<TimeField, string> = {
+  created: "创建任务时自动记录",
+  start: "随状态自动记录",
+  end: "随状态自动记录",
+};
+
+/** `2026-11-04T09:00` → `2026-11-04 09:00`；未设置显示破折号。 */
+function formatSchedule(value: string | null): string {
+  return value === null ? "—" : value.replace("T", " ");
+}
 
 interface State {
   projects: Project[];
@@ -115,11 +129,13 @@ const dom = {
   viewTitle: must<HTMLElement>("view-title"),
   viewCount: must<HTMLElement>("view-count"),
   filters: must<HTMLElement>("filters"),
+  grid: must<HTMLTableElement>("grid"),
   body: must<HTMLTableSectionElement>("grid-body"),
   empty: must<HTMLParagraphElement>("empty"),
   taskForm: must<HTMLFormElement>("task-form"),
   taskInput: must<HTMLInputElement>("task-input"),
   notice: must<HTMLElement>("notice"),
+  resizeTip: must<HTMLElement>("resize-tip"),
   modal: must<HTMLElement>("modal"),
   modalCard: must<HTMLElement>("modal-card"),
   modalTitle: must<HTMLElement>("modal-title"),
@@ -137,6 +153,223 @@ const dom = {
 if (import.meta.env.DEV) {
   dom.devReset.hidden = false;
   dom.devReset.addEventListener("click", () => void resetDatabaseFlow());
+}
+
+// ---------------------------------------------------------------------------
+// 列宽
+// ---------------------------------------------------------------------------
+
+type ResizableColumn = "status" | "title" | "created" | "start" | "end" | "priority" | "note";
+type FixedColumn = Exclude<ResizableColumn, "title">;
+
+/** 「任务」列吃掉剩余宽度，其余列的宽度由用户拖动或默认值决定。 */
+const FIXED_COLUMNS: readonly FixedColumn[] = [
+  "status",
+  "priority",
+  "created",
+  "start",
+  "end",
+  "note",
+];
+const COLUMN_MIN: Record<ResizableColumn, number> = {
+  status: 36,
+  title: 100,
+  created: 80,
+  start: 80,
+  end: 80,
+  priority: 48,
+  note: 60,
+};
+const COLUMN_LABELS: Record<ResizableColumn, string> = {
+  status: "状态",
+  title: "任务",
+  created: "创建",
+  start: "开始",
+  end: "结束",
+  priority: "优先级",
+  note: "备注",
+};
+const COLUMN_STORAGE_KEY = "todolist.columnWidths.v1";
+
+let fixedWidths: Record<FixedColumn, number> | null = null;
+let titleColumnWidth = 0;
+
+function columnElement(key: ResizableColumn): HTMLTableColElement | null {
+  return dom.grid.querySelector<HTMLTableColElement>(`col[data-col="${key}"]`);
+}
+
+function defaultFixedWidths(): Record<FixedColumn, number> {
+  const out = {} as Record<FixedColumn, number>;
+  for (const key of FIXED_COLUMNS) {
+    const parsed = Number.parseFloat(columnElement(key)?.style.width ?? "");
+    out[key] = Number.isFinite(parsed) ? parsed : COLUMN_MIN[key];
+  }
+  return out;
+}
+
+function loadFixedWidths(): Partial<Record<FixedColumn, number>> {
+  try {
+    const raw = localStorage.getItem(COLUMN_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const out: Partial<Record<FixedColumn, number>> = {};
+    for (const key of FIXED_COLUMNS) {
+      const value = parsed[key];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        out[key] = Math.max(COLUMN_MIN[key], value);
+      }
+    }
+    return out;
+  } catch {
+    // 存储不可用或内容坏了：回退到默认列宽，不影响本次使用。
+    return {};
+  }
+}
+
+function currentFixedWidths(): Record<FixedColumn, number> {
+  if (fixedWidths !== null) return fixedWidths;
+  const widths = defaultFixedWidths();
+  const stored = loadFixedWidths();
+  for (const key of FIXED_COLUMNS) {
+    if (stored[key] !== undefined) widths[key] = stored[key];
+  }
+  fixedWidths = widths;
+  return widths;
+}
+
+/** 固定列按当前宽度落位，「任务」列补满剩余空间；窗口变窄时任务列不低于最小值。 */
+function applyColumnWidths(): void {
+  const widths = currentFixedWidths();
+  const fixedTotal = FIXED_COLUMNS.reduce((sum, key) => sum + widths[key], 0);
+  titleColumnWidth = Math.max(COLUMN_MIN.title, dom.grid.clientWidth - fixedTotal);
+
+  for (const key of FIXED_COLUMNS) {
+    const col = columnElement(key);
+    if (col) col.style.width = `${widths[key]}px`;
+  }
+  const titleCol = columnElement("title");
+  if (titleCol) titleCol.style.width = `${titleColumnWidth}px`;
+}
+
+function saveColumnWidths(): void {
+  try {
+    localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(currentFixedWidths()));
+  } catch {
+    // 只影响“下次还记得”，本次拖动已经生效。
+  }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function columnWidthOf(key: ResizableColumn, widths: Record<FixedColumn, number>): number {
+  return key === "title" ? titleColumnWidth : widths[key as FixedColumn];
+}
+
+function columnHeader(key: ResizableColumn): HTMLElement | null {
+  return dom.grid.querySelector<HTMLElement>(`th[data-col="${key}"]`);
+}
+
+function highlightColumns(left: ResizableColumn, right: ResizableColumn, on: boolean): void {
+  for (const key of [left, right]) {
+    const header = columnHeader(key);
+    header?.classList.toggle("is-resizing", on);
+    if (on) header?.classList.remove("is-resize-neighbor");
+  }
+}
+
+function showResizeTip(
+  event: PointerEvent,
+  left: ResizableColumn,
+  right: ResizableColumn,
+  widths: Record<FixedColumn, number>,
+): void {
+  const leftWidth = Math.round(columnWidthOf(left, widths));
+  const rightWidth = Math.round(columnWidthOf(right, widths));
+  dom.resizeTip.textContent = `${COLUMN_LABELS[left]} ${leftWidth}px · ${COLUMN_LABELS[right]} ${rightWidth}px`;
+  dom.resizeTip.hidden = false;
+  const leftPosition = Math.min(
+    window.innerWidth - dom.resizeTip.offsetWidth - 8,
+    event.clientX + 14,
+  );
+  dom.resizeTip.style.left = `${Math.max(8, leftPosition)}px`;
+  dom.resizeTip.style.top = `${Math.min(window.innerHeight - 36, event.clientY + 20)}px`;
+}
+
+function beginColumnResize(
+  event: PointerEvent,
+  left: ResizableColumn,
+  right: ResizableColumn,
+): void {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+
+  const widths = currentFixedWidths();
+  const startX = event.clientX;
+  const startLeft = columnWidthOf(left, widths);
+  const startRight = columnWidthOf(right, widths);
+
+  const onMove = (moveEvent: PointerEvent): void => {
+    const delta = moveEvent.clientX - startX;
+    if (left === "title") {
+      const next = clamp(delta, COLUMN_MIN.title - startLeft, startRight - COLUMN_MIN[right]);
+      widths[right as FixedColumn] = startRight - next;
+    } else if (right === "title") {
+      const next = clamp(delta, COLUMN_MIN[left] - startLeft, startRight - COLUMN_MIN.title);
+      widths[left] = startLeft + next;
+    } else {
+      const next = clamp(delta, COLUMN_MIN[left] - startLeft, startRight - COLUMN_MIN[right]);
+      widths[left] = startLeft + next;
+      widths[right] = startRight - next;
+    }
+    applyColumnWidths();
+    showResizeTip(moveEvent, left, right, widths);
+  };
+
+  const finish = (): void => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    document.body.classList.remove("col-resizing");
+    dom.resizeTip.hidden = true;
+    highlightColumns(left, right, false);
+    saveColumnWidths();
+  };
+
+  document.body.classList.add("col-resizing");
+  highlightColumns(left, right, true);
+  showResizeTip(event, left, right, widths);
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+
+/**
+ * 表头每一条分界线都是拖动把手：拖动时同时改变线两侧的列，总宽度不变；
+ * 悬停时两侧表头一起变色，拖动时浮出两列当前宽度，避免“只动了其中一列”的错觉。
+ */
+function initColumnResizing(): void {
+  applyColumnWidths();
+  for (const handle of dom.grid.querySelectorAll<HTMLElement>(".col-resizer")) {
+    const boundary = handle.dataset.boundary?.split(":");
+    if (!boundary || boundary.length !== 2) continue;
+    const [left, right] = boundary as [ResizableColumn, ResizableColumn];
+    handle.title = "拖动同时调整两侧列宽";
+    handle.addEventListener("pointerdown", (event) => beginColumnResize(event, left, right));
+
+    const highlight = (on: boolean): void => {
+      if (document.body.classList.contains("col-resizing")) return;
+      for (const key of [left, right]) {
+        columnHeader(key)?.classList.toggle("is-resize-neighbor", on);
+      }
+    };
+    handle.addEventListener("pointerenter", () => highlight(true));
+    handle.addEventListener("pointerleave", () => highlight(false));
+  }
+  window.addEventListener("resize", applyColumnWidths);
+  window.requestAnimationFrame(applyColumnWidths);
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +427,8 @@ function render(): void {
   renderSidebar(groups);
   renderToolbar(groups);
   renderTable(groups);
+  // 数据量变化可能让纵向滚动条出现 / 消失，任务列的剩余宽度要跟着重算。
+  applyColumnWidths();
 }
 
 function renderSidebar(groups: Group[]): void {
@@ -611,7 +846,7 @@ function renderGroup(
 
   const row = el("tr", group.depth === 1 ? "row-subgroup" : "row-group");
   const cell = el("td");
-  cell.colSpan = 5;
+  cell.colSpan = 7;
 
   const label = el("span", "group-label");
   label.style.paddingLeft = `${group.depth * 20}px`;
@@ -704,10 +939,57 @@ function renderTaskRow(task: Task, options: TaskRowOptions): HTMLTableRowElement
     renderStatusCell(task),
     renderTitleCell(task, options),
     renderPriorityCell(task),
+    renderTimeCell(task, "created"),
+    renderTimeCell(task, "start"),
+    renderTimeCell(task, "end"),
     renderNoteCell(task),
-    renderActionsCell(task),
   );
+
+  // 行内正在编辑时不抢右键：输入框里的右键仍交给浏览器默认行为处理。
+  row.addEventListener("contextmenu", (event) => {
+    if (
+      event.target instanceof HTMLInputElement ||
+      event.target instanceof HTMLTextAreaElement
+    ) {
+      return;
+    }
+    event.preventDefault();
+    openTaskMenu(task, event);
+  });
+
   return row;
+}
+
+/** 任务右键菜单：移动（仅顶层任务）与删除。 */
+function openTaskMenu(task: Task, event: MouseEvent): void {
+  const items: MenuItem[] = [];
+  if (task.parentTaskId === null) {
+    items.push({
+      label: "移动到…",
+      onSelect: () =>
+        void openMoveMenu(task, { kind: "point", x: event.clientX, y: event.clientY }),
+    });
+  }
+  items.push({ label: "删除任务", onSelect: () => void deleteTaskFlow(task) });
+  openMenu({ items, position: { kind: "point", x: event.clientX, y: event.clientY } });
+}
+
+/**
+ * 创建 / 开始 / 结束各一列，只读。创建时间在新建任务时写入；开始与结束
+ * 随状态变化自动维护。表格里没有录入入口。
+ */
+function renderTimeCell(task: Task, field: TimeField): HTMLTableCellElement {
+  const cell = el("td", "cell-time");
+  const value =
+    field === "created" ? task.createdAt : field === "start" ? task.startAt : task.endAt;
+  const label = `${TIME_LABELS[field]}时间`;
+  const span = el("span", value === null ? "time is-empty" : "time", formatSchedule(value));
+  span.title = `${label}：${value === null ? "未记录" : formatSchedule(value)}（${
+    TIME_HINTS[field]
+  }）`;
+  span.setAttribute("aria-label", span.title);
+  cell.append(span);
+  return cell;
 }
 
 function renderStatusCell(task: Task): HTMLTableCellElement {
@@ -816,7 +1098,7 @@ function renderSubtaskAddRow(parent: Task): HTMLTableRowElement {
   const session = subtaskInputSession;
   const row = el("tr", "row-subtask-add");
   const cell = el("td");
-  cell.colSpan = 5;
+  cell.colSpan = 7;
 
   const input = el("input", "subtask-input");
   input.value = subtaskDraft;
@@ -909,29 +1191,6 @@ function renderNoteCell(task: Task): HTMLTableCellElement {
   button.title = "编辑备注";
   button.setAttribute("aria-label", `备注：${summary || "空"}`);
   button.addEventListener("click", () => void editNote(task));
-  cell.append(button);
-  return cell;
-}
-
-/** 行尾「…」：移动与删除。子任务跟随父任务，不提供单独的移动项。 */
-function renderActionsCell(task: Task): HTMLTableCellElement {
-  const cell = el("td", "cell-actions");
-  const button = el("button", "row-menu", "…");
-  button.type = "button";
-  button.title = "更多";
-  button.setAttribute("aria-label", `任务「${task.title}」的更多操作`);
-  button.setAttribute("aria-haspopup", "menu");
-  button.setAttribute("aria-expanded", "false");
-
-  const items: MenuItem[] = [];
-  if (task.parentTaskId === null) {
-    items.push({ label: "移动到…", onSelect: () => void openMoveMenu(task, button) });
-  }
-  items.push({ label: "删除任务", onSelect: () => void deleteTaskFlow(task) });
-
-  button.addEventListener("click", () => {
-    openMenu({ items, position: { kind: "anchor", element: button } });
-  });
   cell.append(button);
   return cell;
 }
@@ -1036,11 +1295,11 @@ async function moveMenuItems(task: Task): Promise<MenuItem[]> {
 }
 
 /**
- * 「移动到…」的第二级菜单：仍用同一个 `openMenu`，锚在行尾「…」按钮上。
+ * 「移动到…」的第二级菜单：仍用同一个 `openMenu`，在右键位置重新弹出。
  * 项目 → 模块 → 子模块 由菜单组件弹成侧向子面板，父面板不重排。
  * 当前位置不出现在列表里。
  */
-async function openMoveMenu(task: Task, anchor: HTMLButtonElement): Promise<void> {
+async function openMoveMenu(task: Task, position: MenuPosition): Promise<void> {
   try {
     const items = await moveMenuItems(task);
     if (items.length === 0) {
@@ -1048,11 +1307,7 @@ async function openMoveMenu(task: Task, anchor: HTMLButtonElement): Promise<void
       return;
     }
 
-    openMenu({
-      items,
-      position: { kind: "anchor", element: anchor },
-      label: "移动到",
-    });
+    openMenu({ items, position, label: "移动到" });
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -1773,6 +2028,7 @@ function boot(): void {
   document.addEventListener("contextmenu", (event) => {
     event.preventDefault();
   });
+  initColumnResizing();
   render();
   void reload();
 }

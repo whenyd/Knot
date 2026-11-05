@@ -3,6 +3,7 @@
 //! 命令层只做参数解包 + 转发；SQL 不重复表达这里的规则（不用触发器），
 //! 否则同一套规则会有两个实现，必然漂移。
 
+use chrono::Local;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
@@ -171,6 +172,11 @@ pub struct Task {
     pub status: Status,
     pub priority: Priority,
     pub note: String,
+    /// 本地时间 `YYYY-MM-DDTHH:MM`；新建任务时写入，升级前的任务为 `None`。
+    pub created_at: Option<String>,
+    /// 本地时间 `YYYY-MM-DDTHH:MM`，`None` = 未记录；由状态变化自动维护。
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
     pub sort_order: i64,
 }
 
@@ -221,7 +227,7 @@ pub struct DeleteOutcome {
 
 /// 任务表的列顺序，读任务的地方只有这一份，避免 `row.get(i)` 的序号漂移。
 const TASK_COLUMNS: &str = "id, project_id, module_id, submodule_id, parent_task_id, \
-                            title, status, priority, note, sort_order";
+                            title, status, priority, note, sort_order, start_at, end_at, created_at";
 
 // ---------------------------------------------------------------------------
 // 读
@@ -462,10 +468,11 @@ pub fn create_task(
         _ => Priority::Mid,
     };
 
+    let created_at = now_local();
     tx.execute(
         "INSERT INTO task (project_id, module_id, submodule_id, parent_task_id, \
-                           title, status, priority, sort_order) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                           title, status, priority, sort_order, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             project_id,
             module_id,
@@ -475,7 +482,8 @@ pub fn create_task(
             // 默认值由领域层写出来，不靠 schema 的 DEFAULT：规则只有一处真相。
             Status::Todo.as_str(),
             priority.as_str(),
-            sort_order
+            sort_order,
+            &created_at
         ],
     )
     .map_err(db_err)?;
@@ -490,6 +498,9 @@ pub fn create_task(
         status: Status::Todo,
         priority,
         note: String::new(),
+        created_at: Some(created_at),
+        start_at: None,
+        end_at: None,
         sort_order,
     };
 
@@ -670,15 +681,16 @@ pub fn apply_set_status(
 ) -> Res<StatusOutcome> {
     let mut task = load_task(conn, id)?;
     let parent_id = task.parent_task_id;
+    let now = now_local();
     let tx = conn.unchecked_transaction().map_err(db_err)?;
 
-    write_status(&tx, &mut task, status)?;
+    write_status(&tx, &mut task, status, &now)?;
     let mut changed = vec![task];
     let mut notices = Vec::new();
 
     if cascade && status == Status::Done {
         for mut child in unfinished_children(&tx, id)? {
-            write_status(&tx, &mut child, Status::Done)?;
+            write_status(&tx, &mut child, Status::Done, &now)?;
             changed.push(child);
         }
     }
@@ -828,14 +840,45 @@ pub fn delete_project(conn: &Connection, id: i64) -> Res<()> {
 // 内部
 // ---------------------------------------------------------------------------
 
-fn write_status(conn: &Connection, task: &mut Task, status: Status) -> Res<()> {
+/// 写状态，并按状态变化维护开始 / 结束时间。
+///
+/// 只有状态**真的改变**时才动时间，重复写同一状态不会覆盖已有时间：
+/// - 进入 `doing`：开始时间为空则记当前时间；结束时间清空（继续做，尚未结束）
+/// - 进入 `done`：记当前时间为结束时间
+/// - 回到 `todo`：清空两项（这一轮作废，下次开始时重新记）
+///
+/// 聚合自动改动父任务时也走这里，所以自动完成 / 自动恢复同样会维护时间。
+fn write_status(conn: &Connection, task: &mut Task, status: Status, now: &str) -> Res<()> {
+    if status != task.status {
+        match status {
+            Status::Todo => {
+                task.start_at = None;
+                task.end_at = None;
+            }
+            Status::Doing => {
+                if task.start_at.is_none() {
+                    task.start_at = Some(now.to_string());
+                }
+                task.end_at = None;
+            }
+            Status::Done => {
+                task.end_at = Some(now.to_string());
+            }
+        }
+    }
+
     conn.execute(
-        "UPDATE task SET status = ?1 WHERE id = ?2",
-        params![status.as_str(), task.id],
+        "UPDATE task SET status = ?1, start_at = ?2, end_at = ?3 WHERE id = ?4",
+        params![status.as_str(), task.start_at, task.end_at, task.id],
     )
     .map_err(db_err)?;
     task.status = status;
     Ok(())
+}
+
+/// 状态变化时记录的本地时间，精度到分钟；格式与 `start_at` / `end_at` 一致。
+fn now_local() -> String {
+    Local::now().format("%Y-%m-%dT%H:%M").to_string()
 }
 
 fn load_task(conn: &Connection, id: i64) -> Res<Task> {
@@ -911,7 +954,7 @@ fn aggregate_parent_status(conn: &Connection, parent_id: i64) -> Res<Option<Pare
         Status::Doing
     };
 
-    write_status(conn, &mut parent, next)?;
+    write_status(conn, &mut parent, next, &now_local())?;
     let notice = match next {
         Status::Done => format!("父任务「{}」已自动标记为已完成", parent.title),
         Status::Doing => format!("父任务「{}」已恢复为进行中", parent.title),
@@ -935,6 +978,9 @@ struct TaskRow {
     priority: String,
     note: String,
     sort_order: i64,
+    start_at: Option<String>,
+    end_at: Option<String>,
+    created_at: Option<String>,
 }
 
 impl TaskRow {
@@ -949,6 +995,9 @@ impl TaskRow {
             status: Status::from_db(&self.status)?,
             priority: Priority::from_db(&self.priority)?,
             note: self.note,
+            created_at: self.created_at,
+            start_at: self.start_at,
+            end_at: self.end_at,
             sort_order: self.sort_order,
         })
     }
@@ -966,6 +1015,9 @@ fn map_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         priority: row.get(7)?,
         note: row.get(8)?,
         sort_order: row.get(9)?,
+        start_at: row.get(10)?,
+        end_at: row.get(11)?,
+        created_at: row.get(12)?,
     })
 }
 
@@ -2421,6 +2473,177 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // 开始 / 结束时间：由状态变化自动维护
+    // -----------------------------------------------------------------------
+
+    /// 时间格式固定为 16 位本地时间，返回引用方便继续比较先后。
+    fn assert_local_time(value: &Option<String>) -> &str {
+        let raw = value.as_deref().expect("状态变化后应自动记录时间");
+        let bytes = raw.as_bytes();
+        assert_eq!(bytes.len(), 16, "{raw}");
+        assert!(
+            (bytes[4] == b'-' && bytes[7] == b'-' && bytes[10] == b'T' && bytes[13] == b':'),
+            "{raw}"
+        );
+        assert!(
+            bytes
+                .iter()
+                .enumerate()
+                .all(|(i, byte)| matches!(i, 4 | 7 | 10 | 13) || byte.is_ascii_digit()),
+            "{raw}"
+        );
+        raw
+    }
+
+    #[test]
+    fn new_task_records_created_at_only() {
+        let conn = conn();
+        let task = seed_task(&conn);
+        assert_local_time(&task.created_at);
+        assert_eq!(task.start_at, None);
+        assert_eq!(task.end_at, None);
+    }
+
+    /// 进入进行中：记开始时间，结束时间保持为空。
+    #[test]
+    fn moving_to_doing_records_start_only() {
+        let conn = conn();
+        let task = seed_task(&conn);
+
+        let outcome = apply_set_status(&conn, task.id, Status::Doing, false).unwrap();
+        let changed = &outcome.changed[0];
+        assert_local_time(&changed.start_at);
+        assert_eq!(changed.end_at, None);
+
+        let loaded = load_task(&conn, task.id).unwrap();
+        assert_local_time(&loaded.start_at);
+        assert_eq!(loaded.end_at, None);
+    }
+
+    /// 进行中 → 已完成：保留开始时间，记结束时间，且结束不早于开始。
+    #[test]
+    fn completing_records_end_and_keeps_start() {
+        let conn = conn();
+        let task = seed_task(&conn);
+
+        let doing = apply_set_status(&conn, task.id, Status::Doing, false)
+            .unwrap()
+            .changed[0]
+            .clone();
+        let start = doing.start_at.clone();
+
+        let outcome = apply_set_status(&conn, task.id, Status::Done, false).unwrap();
+        let changed = &outcome.changed[0];
+        assert_eq!(changed.start_at, start);
+        let end = assert_local_time(&changed.end_at);
+        assert!(
+            end >= start.as_deref().unwrap(),
+            "结束 {end} 不应早于开始 {:?}",
+            start
+        );
+    }
+
+    /// 退回未完成：两项一起清空，下一轮重新开始。
+    #[test]
+    fn returning_to_todo_clears_both_times() {
+        let conn = conn();
+        let task = seed_task(&conn);
+
+        apply_set_status(&conn, task.id, Status::Doing, false).unwrap();
+        apply_set_status(&conn, task.id, Status::Done, false).unwrap();
+        let cleared = apply_set_status(&conn, task.id, Status::Todo, false)
+            .unwrap()
+            .changed[0]
+            .clone();
+        assert_eq!(cleared.start_at, None);
+        assert_eq!(cleared.end_at, None);
+
+        // 再进入进行中，是全新的一轮。
+        let again = apply_set_status(&conn, task.id, Status::Doing, false)
+            .unwrap()
+            .changed[0]
+            .clone();
+        assert_local_time(&again.start_at);
+        assert_eq!(again.end_at, None);
+    }
+
+    /// 重复写入同一个状态不改写已有时间。
+    #[test]
+    fn rewriting_same_status_keeps_times() {
+        let conn = conn();
+        let task = seed_task(&conn);
+
+        apply_set_status(&conn, task.id, Status::Doing, false).unwrap();
+        let done = apply_set_status(&conn, task.id, Status::Done, false)
+            .unwrap()
+            .changed[0]
+            .clone();
+        let end = done.end_at.clone();
+
+        let again = apply_set_status(&conn, task.id, Status::Done, false)
+            .unwrap()
+            .changed[0]
+            .clone();
+        assert_eq!(again.start_at, done.start_at);
+        assert_eq!(again.end_at, end);
+    }
+
+    /// 级联完成：未开始的子任务只记结束，进行中的子任务保有自己的开始时间。
+    #[test]
+    fn cascade_done_stamps_children() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let started = create_child(&conn, &parent, "已开始").task;
+        let untouched = create_child(&conn, &parent, "未开始").task;
+        apply_set_status(&conn, started.id, Status::Doing, false).unwrap();
+        let started_at = load_task(&conn, started.id).unwrap().start_at;
+
+        apply_set_status(&conn, parent.id, Status::Done, true).unwrap();
+
+        let started_after = load_task(&conn, started.id).unwrap();
+        assert_eq!(started_after.start_at, started_at);
+        assert_local_time(&started_after.end_at);
+
+        let untouched_after = load_task(&conn, untouched.id).unwrap();
+        assert_eq!(untouched_after.start_at, None);
+        assert_local_time(&untouched_after.end_at);
+    }
+
+    /// 子任务全部完成触发父任务自动完成，父任务也要落下结束时间。
+    #[test]
+    fn aggregate_done_stamps_parent_end() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let child = create_child(&conn, &parent, "子任务").task;
+
+        apply_set_status(&conn, child.id, Status::Done, false).unwrap();
+
+        let parent_after = load_task(&conn, parent.id).unwrap();
+        assert_eq!(parent_after.status.as_str(), "done");
+        assert_local_time(&parent_after.end_at);
+    }
+
+    /// 子任务被退回导致父任务自动恢复进行中：清结束时间，保留开始时间。
+    #[test]
+    fn aggregate_reopen_clears_parent_end_and_keeps_start() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        let child = create_child(&conn, &parent, "子任务").task;
+
+        apply_set_status(&conn, parent.id, Status::Doing, false).unwrap();
+        let start = load_task(&conn, parent.id).unwrap().start_at;
+        apply_set_status(&conn, child.id, Status::Done, false).unwrap();
+        assert_local_time(&load_task(&conn, parent.id).unwrap().end_at);
+
+        apply_set_status(&conn, child.id, Status::Todo, false).unwrap();
+
+        let reopened = load_task(&conn, parent.id).unwrap();
+        assert_eq!(reopened.status.as_str(), "doing");
+        assert_eq!(reopened.start_at, start);
+        assert_eq!(reopened.end_at, None);
+    }
+
+    // -----------------------------------------------------------------------
     // 归类移动
     // -----------------------------------------------------------------------
 
@@ -2675,12 +2898,17 @@ mod tests {
             "moduleId",
             "submoduleId",
             "parentTaskId",
+            "createdAt",
+            "startAt",
+            "endAt",
             "sortOrder",
         ] {
             assert!(json.get(key).is_some(), "缺少 {key}");
         }
         assert_eq!(json["status"], "todo");
         assert_eq!(json["priority"], "mid");
+        assert!(json["startAt"].is_null(), "未设置的时间是 null，不是缺字段");
+        assert!(!json["createdAt"].is_null(), "新建任务应有创建时间");
     }
 
     #[test]
