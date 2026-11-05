@@ -1,7 +1,22 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // 先定主题再加载样式，避免首屏先闪一下浅色（CSP 为 null，允许内联）。
+      (() => {
+        try {
+          const stored = localStorage.getItem("todolist.theme.v1");
+          const mode = stored === "light" || stored === "dark" || stored === "system" ? stored : "light";
+          const dark =
+            mode === "dark" ||
+            (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.dataset.theme = dark ? "dark" : "light";
+        } catch {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>我的待办</title>
@@ -9,90 +24,196 @@
   </head>
 
   <body>
+    <!-- 16px 描边图标；状态图标使用 currentColor，随主题变色。 -->
+    <svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="i-chevron" viewBox="0 0 16 16">
+        <path
+          d="M4 6l4 4 4-4"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 16 16">
+        <path
+          d="M8 3.5v9M3.5 8h9"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+        />
+      </symbol>
+      <symbol id="i-status-todo" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="5.25" fill="none" stroke="currentColor" stroke-width="1.5" />
+      </symbol>
+      <symbol id="i-status-doing" viewBox="0 0 16 16">
+        <circle
+          cx="8"
+          cy="8"
+          r="5.25"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          opacity=".45"
+        />
+        <path d="M8 2.75a5.25 5.25 0 0 1 0 10.5z" fill="currentColor" />
+      </symbol>
+      <symbol id="i-status-done" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="6" fill="currentColor" />
+        <path
+          d="M5 8.2l2 2 4.2-4.4"
+          fill="none"
+          stroke="#fff"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="2.6" fill="none" stroke="currentColor" stroke-width="1.3" />
+        <path
+          d="M8 1.5v1.4M8 13.1v1.4M1.5 8h1.4M13.1 8h1.4M3.4 3.4l1 1M11.6 11.6l1 1M12.6 3.4l-1 1M4.4 11.6l-1 1"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.3"
+          stroke-linecap="round"
+        />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 16 16">
+        <path
+          d="M13.2 9.8A5.5 5.5 0 0 1 6.2 2.8a5.5 5.5 0 1 0 7 7z"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.3"
+          stroke-linejoin="round"
+        />
+      </symbol>
+      <symbol id="i-monitor" viewBox="0 0 16 16">
+        <rect
+          x="2.2"
+          y="3"
+          width="11.6"
+          height="8"
+          rx="1.2"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.3"
+        />
+        <path
+          d="M6 13.2h4M8 11v2.2"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.3"
+          stroke-linecap="round"
+        />
+      </symbol>
+    </svg>
+
     <div class="app">
-      <!-- 左栏：最上方恒为「我的待办」，下面才是项目分段与项目列表 -->
-      <aside class="sidebar">
-        <nav class="side-group" id="todo-section"></nav>
-
-        <div class="side-heading">项目</div>
-        <nav class="side-group" id="project-section"></nav>
-
-        <form class="side-form" id="project-form" hidden>
-          <input
-            id="project-input"
-            placeholder="项目名，回车创建"
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </form>
-        <button class="side-add" id="project-add" type="button">＋ 新建项目</button>
-
-        <!-- 范围树：全部 / 模块 / 子模块 / 默认。「我的待办」没有这层。
-             新建与重命名的入口都在右键菜单里，这里不再摆按钮。 -->
-        <div class="side-heading" id="scope-heading">范围</div>
-        <nav class="side-group" id="scope-section"></nav>
-
-        <!-- 仅开发版显示；正式构建里 import.meta.env.DEV 为 false，永远保持隐藏。 -->
-        <button class="side-add dev-reset" id="dev-reset" type="button" hidden>
-          重置数据库（开发）
+      <!-- 应用内顶栏：项目切换在左，筛选在右；系统标题栏保持不变。 -->
+      <header class="topbar">
+        <button
+          class="project-btn"
+          id="project-btn"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          title="项目菜单"
+        >
+          <span>项目</span>
+          <svg class="icon project-caret" viewBox="0 0 16 16" aria-hidden="true">
+            <use href="#i-chevron"></use>
+          </svg>
         </button>
-      </aside>
+        <div class="filter-groups" id="filters" aria-label="任务筛选"></div>
+      </header>
 
-      <main class="main">
-        <header class="toolbar">
-          <h1 class="view-title" id="view-title">我的待办</h1>
-          <span class="badge" id="view-count"></span>
-          <div class="filter-groups" id="filters" aria-label="任务筛选"></div>
-        </header>
+      <div class="workspace">
+        <!-- 左栏：「我的待办」恒在最上；当前项目名下面是模块/子模块树。 -->
+        <aside class="sidebar">
+          <nav class="side-group" id="todo-section"></nav>
 
-        <div class="grid-scroll">
-          <table class="grid" id="grid">
-            <colgroup>
-              <col data-col="status" style="width: 52px" />
-              <col data-col="title" />
-              <col data-col="priority" style="width: 72px" />
-              <col data-col="created" style="width: 128px" />
-              <col data-col="start" style="width: 128px" />
-              <col data-col="end" style="width: 128px" />
-              <col data-col="note" style="width: 160px" />
-            </colgroup>
-            <thead>
-              <tr>
-                <th data-col="status">
-                  状态<span class="col-resizer" data-boundary="status:title"></span>
-                </th>
-                <th data-col="title">
-                  任务<span class="col-resizer" data-boundary="title:priority"></span>
-                </th>
-                <th data-col="priority">
-                  优先级<span class="col-resizer" data-boundary="priority:created"></span>
-                </th>
-                <th data-col="created">
-                  创建<span class="col-resizer" data-boundary="created:start"></span>
-                </th>
-                <th data-col="start">
-                  开始<span class="col-resizer" data-boundary="start:end"></span>
-                </th>
-                <th data-col="end">
-                  结束<span class="col-resizer" data-boundary="end:note"></span>
-                </th>
-                <th data-col="note">备注</th>
-              </tr>
-            </thead>
-            <tbody id="grid-body"></tbody>
-          </table>
-          <p class="empty" id="empty" hidden></p>
+          <div class="side-heading" id="project-heading" hidden></div>
+          <nav class="side-group" id="scope-section"></nav>
+
+          <!-- 仅开发版显示；正式构建里 import.meta.env.DEV 为 false，永远保持隐藏。 -->
+          <button class="side-add dev-reset" id="dev-reset" type="button" hidden>
+            重置数据库（开发）
+          </button>
+        </aside>
+
+        <main class="main">
+          <div class="grid-scroll">
+            <table class="grid" id="grid">
+              <colgroup>
+                <col data-col="status" style="width: 44px" />
+                <col data-col="title" />
+                <col data-col="priority" style="width: 76px" />
+                <col data-col="created" style="width: 132px" />
+                <col data-col="start" style="width: 132px" />
+                <col data-col="end" style="width: 132px" />
+                <col data-col="note" style="width: 160px" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th data-col="status">
+                    状态<span class="col-resizer" data-boundary="status:title"></span>
+                  </th>
+                  <th data-col="title">
+                    任务<span class="col-resizer" data-boundary="title:priority"></span>
+                  </th>
+                  <th data-col="priority">
+                    优先级<span class="col-resizer" data-boundary="priority:created"></span>
+                  </th>
+                  <th data-col="created">
+                    创建<span class="col-resizer" data-boundary="created:start"></span>
+                  </th>
+                  <th data-col="start">
+                    开始<span class="col-resizer" data-boundary="start:end"></span>
+                  </th>
+                  <th data-col="end">
+                    结束<span class="col-resizer" data-boundary="end:note"></span>
+                  </th>
+                  <th data-col="note">备注</th>
+                </tr>
+              </thead>
+              <tbody id="grid-body"></tbody>
+            </table>
+            <p class="empty" id="empty" hidden></p>
+          </div>
+
+          <form class="add" id="task-form">
+            <input
+              id="task-input"
+              placeholder="添加任务，回车保存（优先级中）"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </form>
+        </main>
+      </div>
+
+      <footer class="statusbar" aria-label="状态栏">
+        <div class="status-right">
+          <span class="status-count" id="status-count"></span>
+          <span class="status-sep" aria-hidden="true"></span>
+          <button
+            class="status-btn"
+            id="theme-btn"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            title="切换主题"
+          >
+            <svg class="icon" id="theme-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <use href="#i-sun"></use>
+            </svg>
+            <span id="theme-label">浅色</span>
+          </button>
         </div>
-
-        <form class="add" id="task-form">
-          <input
-            id="task-input"
-            placeholder="添加任务，回车保存（优先级中）"
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </form>
-      </main>
+      </footer>
     </div>
 
     <div class="notice" id="notice" role="status" hidden></div>

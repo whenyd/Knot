@@ -19,6 +19,8 @@ export interface MenuItem {
   children?: readonly MenuItem[];
   /** 当前选中项：显示勾，并让屏幕阅读器读作 menuitemradio。 */
   checked?: boolean;
+  /** 非菜单行的装饰：分隔线 / 分组标题。默认是普通菜单项。 */
+  type?: "item" | "separator" | "header";
 }
 
 export type MenuPosition =
@@ -32,6 +34,8 @@ export interface MenuOptions {
   label?: string;
   /** 关闭后把焦点还给谁；元素锚定时默认还给锚点。 */
   restoreFocus?: HTMLElement;
+  /** 额外的根面板 class，用来做项目菜单这类专用外观。 */
+  className?: string;
 }
 
 interface PanelEntry {
@@ -127,7 +131,7 @@ export function openMenu(options: MenuOptions): void {
   };
   open = session;
 
-  const root = createPanel(session, items, 0, options.label ?? "", null, null);
+  const root = createPanel(session, items, 0, options.label ?? "", null, null, options.className);
   document.body.append(root.element);
   session.panels.push(root);
   placeRoot(root.element, position);
@@ -177,9 +181,10 @@ function createPanel(
   name: string,
   parent: Panel | null,
   parentEntry: PanelEntry | null,
+  className?: string,
 ): Panel {
   const element = document.createElement("div");
-  element.className = "menu";
+  element.className = className ? `menu ${className}` : "menu";
   element.setAttribute("role", "menu");
   if (name) element.setAttribute("aria-label", name);
   element.style.zIndex = String(BASE_Z_INDEX + level);
@@ -195,6 +200,22 @@ function createPanel(
   };
 
   for (const item of items) {
+    if (item.type === "separator") {
+      const separator = document.createElement("div");
+      separator.className = "menu-separator";
+      separator.setAttribute("role", "separator");
+      element.append(separator);
+      continue;
+    }
+    if (item.type === "header") {
+      const header = document.createElement("div");
+      header.className = "menu-header";
+      header.textContent = item.label;
+      header.setAttribute("role", "presentation");
+      element.append(header);
+      continue;
+    }
+
     const entry = createEntry(session, panel, item);
     panel.entries.push(entry);
     element.append(entry.button);

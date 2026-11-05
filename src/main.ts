@@ -63,9 +63,13 @@ function formatSchedule(value: string | null): string {
 interface State {
   projects: Project[];
   container: Container;
+  /** 当前项目上下文；切到「我的待办」后仍保留，用于左栏项目名和模块树。 */
+  projectId: number | null;
   scope: Scope;
   modules: Module[];
   tasks: Task[];
+  /** 当前项目上下文的全部任务，供左栏模块树计数；与表格容器解耦。 */
+  projectTasks: Task[];
   /** 左栏范围树里**收起**的模块 id。默认展开，所以存的是收起的那几个。 */
   collapsedNodes: Set<number>;
   /** 表格里收起的分类分组，key 由 `groupKey` 生成。与左栏的收起互不影响。 */
@@ -82,9 +86,11 @@ interface State {
 const state: State = {
   projects: [],
   container: { kind: "todo" },
+  projectId: null,
   scope: { kind: "project" },
   modules: [],
   tasks: [],
+  projectTasks: [],
   collapsedNodes: new Set(),
   collapsedGroups: new Set(),
   addingSubtaskFor: null,
@@ -97,6 +103,8 @@ const state: State = {
 let subtaskDraft = "";
 /** 输入会话号：旧的失焦回调只认自己那一轮，免得点「＋」时误提交上一轮。 */
 let subtaskInputSession = 0;
+/** 首次加载时把上次项目接回来；之后的 reload 不能再覆盖用户当前选择。 */
+let startupProjectRestored = false;
 
 // ---------------------------------------------------------------------------
 // DOM
@@ -119,22 +127,34 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** 引用 index.html 里的 symbol；尺寸交给 CSS。 */
+function icon(name: string, className = "icon"): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", className);
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(SVG_NS, "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.append(use);
+  return svg;
+}
+
 const dom = {
   todoSection: must<HTMLElement>("todo-section"),
-  projectSection: must<HTMLElement>("project-section"),
-  projectForm: must<HTMLFormElement>("project-form"),
-  projectInput: must<HTMLInputElement>("project-input"),
-  projectAdd: must<HTMLButtonElement>("project-add"),
-  scopeHeading: must<HTMLElement>("scope-heading"),
+  projectHeading: must<HTMLElement>("project-heading"),
   scopeSection: must<HTMLElement>("scope-section"),
-  viewTitle: must<HTMLElement>("view-title"),
-  viewCount: must<HTMLElement>("view-count"),
+  projectBtn: must<HTMLButtonElement>("project-btn"),
   filters: must<HTMLElement>("filters"),
   grid: must<HTMLTableElement>("grid"),
   body: must<HTMLTableSectionElement>("grid-body"),
   empty: must<HTMLParagraphElement>("empty"),
   taskForm: must<HTMLFormElement>("task-form"),
   taskInput: must<HTMLInputElement>("task-input"),
+  statusCount: must<HTMLElement>("status-count"),
+  themeBtn: must<HTMLButtonElement>("theme-btn"),
+  themeLabel: must<HTMLElement>("theme-label"),
   notice: must<HTMLElement>("notice"),
   resizeTip: must<HTMLElement>("resize-tip"),
   modal: must<HTMLElement>("modal"),
@@ -154,6 +174,113 @@ const dom = {
 if (import.meta.env.DEV) {
   dom.devReset.hidden = false;
   dom.devReset.addEventListener("click", () => void resetDatabaseFlow());
+}
+
+// ---------------------------------------------------------------------------
+// 主题与当前项目
+// ---------------------------------------------------------------------------
+
+type ThemeMode = "light" | "dark" | "system";
+const THEME_STORAGE_KEY = "todolist.theme.v1";
+const PROJECT_STORAGE_KEY = "todolist.currentProject.v1";
+
+function readThemeMode(): ThemeMode {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    return stored === "light" || stored === "dark" || stored === "system" ? stored : "light";
+  } catch {
+    return "light";
+  }
+}
+
+function applyTheme(mode: ThemeMode): void {
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const resolved = mode === "system" ? (prefersDark ? "dark" : "light") : mode;
+  document.documentElement.dataset.theme = resolved;
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, mode);
+  } catch {
+    // 存储不可用只影响下次启动的偏好，不阻塞主题切换。
+  }
+
+  const iconName = mode === "light" ? "sun" : mode === "dark" ? "moon" : "monitor";
+  dom.themeBtn.querySelector("use")?.setAttribute("href", `#i-${iconName}`);
+  dom.themeLabel.textContent = mode === "light" ? "浅色" : mode === "dark" ? "深色" : "跟随系统";
+}
+
+function initTheme(): void {
+  applyTheme(readThemeMode());
+  dom.themeBtn.addEventListener("click", () => {
+    const mode = readThemeMode();
+    openMenu({
+      items: [
+        { label: "浅色", checked: mode === "light", onSelect: () => applyTheme("light") },
+        { label: "深色", checked: mode === "dark", onSelect: () => applyTheme("dark") },
+        { label: "跟随系统", checked: mode === "system", onSelect: () => applyTheme("system") },
+      ],
+      position: { kind: "anchor", element: dom.themeBtn },
+      label: "主题",
+    });
+  });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (readThemeMode() === "system") applyTheme("system");
+  });
+}
+
+function readSavedProjectId(): number | null {
+  try {
+    const raw = localStorage.getItem(PROJECT_STORAGE_KEY);
+    if (raw === null) return null;
+    const id = Number(raw);
+    return Number.isInteger(id) && id > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 记住当前项目上下文；「我的待办」不是项目，不写入。 */
+function persistCurrentProject(): void {
+  try {
+    if (state.projectId !== null) {
+      localStorage.setItem(PROJECT_STORAGE_KEY, String(state.projectId));
+    } else {
+      localStorage.removeItem(PROJECT_STORAGE_KEY);
+    }
+  } catch {
+    // 存储不可用时退回本次会话的导航行为。
+  }
+}
+
+function deleteCurrentProject(): void {
+  const project = currentProject();
+  if (!project || project.isTodo) {
+    showNotice("「我的待办」不是项目，不能删除");
+    return;
+  }
+  void deleteProjectFlow(project);
+}
+
+function openProjectMenu(): void {
+  const items: MenuItem[] = [
+    { label: "新建项目…", onSelect: () => void createProjectFlow() },
+    { label: "删除项目", onSelect: deleteCurrentProject },
+    { type: "separator", label: "" },
+    { type: "header", label: "所有项目" },
+    ...state.projects
+      .filter((project) => !project.isTodo)
+      .map((project) => ({
+        label: project.name,
+        checked: isCurrent(project),
+        onSelect: () => void selectProject(project),
+      })),
+  ];
+
+  openMenu({
+    items,
+    position: { kind: "anchor", element: dom.projectBtn },
+    label: "项目",
+    className: "is-project",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -440,10 +567,45 @@ function initColumnResizing(): void {
 async function reload(): Promise<void> {
   try {
     state.projects = await api.listProjects();
+
+    // 第一次加载才恢复上次项目；之后的 reload 必须尊重用户当前的选择。
+    if (!startupProjectRestored) {
+      startupProjectRestored = true;
+      const saved = readSavedProjectId();
+      if (saved !== null) {
+        const project = state.projects.find((item) => item.id === saved && !item.isTodo);
+        if (project && project.id !== null) {
+          state.container = { kind: "project", id: project.id };
+          state.projectId = project.id;
+          state.scope = { kind: "project" };
+        } else {
+          state.projectId = null;
+          try {
+            localStorage.removeItem(PROJECT_STORAGE_KEY);
+          } catch {
+            // 忽略：无效值不阻塞启动。
+          }
+        }
+      }
+    }
+
     // 取成局部量：容器在 await 之间可能被用户切走，一次重画只认一个容器。
     const container = state.container;
-    state.modules = container.kind === "project" ? await api.listModules(container.id) : [];
+    const projectId = state.projectId;
+    if (projectId !== null) {
+      state.modules = await api.listModules(projectId);
+      state.projectTasks =
+        container.kind === "project" && container.id === projectId
+          ? []
+          : await api.listTasks({ kind: "project", id: projectId });
+    } else {
+      state.modules = [];
+      state.projectTasks = [];
+    }
     state.tasks = await api.listTasks(container);
+    if (projectId !== null && container.kind === "project" && container.id === projectId) {
+      state.projectTasks = state.tasks;
+    }
     pruneSubtaskInput();
     render();
   } catch (error) {
@@ -452,8 +614,10 @@ async function reload(): Promise<void> {
 }
 
 async function selectProject(project: Project): Promise<void> {
-  state.container =
-    project.isTodo || project.id === null ? { kind: "todo" } : { kind: "project", id: project.id };
+  const isTodo = project.isTodo || project.id === null;
+  state.container = isTodo ? { kind: "todo" } : { kind: "project", id: project.id as number };
+  // 切到「我的待办」不清空项目上下文：左栏项目名和模块树要继续可见。
+  if (!isTodo) state.projectId = project.id;
   // 换容器等于换了一棵树：范围回到"整个项目"，收起状态也没有意义了。
   state.scope = { kind: "project" };
   state.collapsedNodes.clear();
@@ -461,6 +625,7 @@ async function selectProject(project: Project): Promise<void> {
   state.collapsedTasks.clear();
   state.addingSubtaskFor = null;
   subtaskDraft = "";
+  persistCurrentProject();
   closeMenu();
   await reload();
 }
@@ -482,9 +647,11 @@ function pruneSubtaskInput(): void {
 // ---------------------------------------------------------------------------
 
 function render(): void {
-  // 分组只算一次：左栏范围树和表格用的是同一棵树。
+  // 表格用当前容器的任务；左栏树始终展示项目上下文（切到「我的待办」时也保留）。
   const groups = buildGroups(state.tasks, state.modules);
-  renderSidebar(groups);
+  const sidebarGroups =
+    state.projectId !== null ? buildGroups(state.projectTasks, state.modules) : groups;
+  renderSidebar(sidebarGroups);
   renderToolbar(groups);
   renderTable(groups);
   // 数据量变化可能让纵向滚动条出现 / 消失，任务列的剩余宽度要跟着重算。
@@ -493,12 +660,14 @@ function render(): void {
 
 function renderSidebar(groups: Group[]): void {
   dom.todoSection.replaceChildren();
-  dom.projectSection.replaceChildren();
 
-  for (const project of state.projects) {
-    const button = renderSideItem(project);
-    (project.isTodo ? dom.todoSection : dom.projectSection).append(button);
-  }
+  const todo = state.projects.find((project) => project.isTodo);
+  if (todo) dom.todoSection.append(renderSideItem(todo));
+
+  const project = currentProject();
+  const hasProject = state.projectId !== null && project !== undefined && !project.isTodo;
+  dom.projectHeading.textContent = hasProject ? project.name : "";
+  dom.projectHeading.hidden = !hasProject;
 
   renderScopeTree(groups);
 }
@@ -541,13 +710,15 @@ function renderSideItem(project: Project): HTMLButtonElement {
 
 function isCurrent(project: Project): boolean {
   if (project.isTodo) return state.container.kind === "todo";
-  return state.container.kind === "project" && state.container.id === project.id;
+  return project.id !== null && state.projectId === project.id;
 }
 
 function currentProject(): Project | undefined {
-  const { container } = state;
-  if (container.kind === "todo") return state.projects.find((p) => p.isTodo);
-  return state.projects.find((p) => p.id === container.id);
+  if (state.projectId !== null) {
+    const project = state.projects.find((p) => p.id === state.projectId);
+    if (project) return project;
+  }
+  return state.projects.find((p) => p.isTodo);
 }
 
 /**
@@ -557,8 +728,7 @@ function currentProject(): Project | undefined {
 function renderScopeTree(groups: Group[]): void {
   dom.scopeSection.replaceChildren();
 
-  const visible = state.container.kind === "project";
-  dom.scopeHeading.hidden = !visible;
+  const visible = state.projectId !== null;
   dom.scopeSection.hidden = !visible;
   if (!visible) return;
 
@@ -631,10 +801,11 @@ function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
     const { id, collapsed } = options.collapsible;
     // 三角由 CSS 的 ::before 画，元素里不要放字符：
     // 字面 ▾ 叠上伪元素就是两个三角（已经错过一次）。
-    const caret = el("button", collapsed ? "scope-caret is-collapsed" : "scope-caret");
+    const caret = el("button", collapsed ? "scope-caret is-collapsed has-icon" : "scope-caret has-icon");
     caret.type = "button";
     caret.title = collapsed ? "展开子模块" : "收起子模块";
     caret.setAttribute("aria-label", caret.title);
+    caret.append(icon("chevron"));
     caret.addEventListener("click", () => {
       toggleNode(id);
     });
@@ -668,7 +839,7 @@ function scopeMenuItems(options: ScopeNodeOptions): MenuItem[] {
 
   switch (scope.kind) {
     case "project": {
-      const projectId = state.container.kind === "project" ? state.container.id : null;
+      const projectId = state.projectId;
       return projectId === null
         ? []
         : [{ label: "新建模块", onSelect: () => void createModuleIn(projectId) }];
@@ -696,6 +867,7 @@ function scopeMenuItems(options: ScopeNodeOptions): MenuItem[] {
 }
 
 function isScopeCurrent(scope: Scope): boolean {
+  if (state.container.kind !== "project") return false;
   if (scope.kind !== state.scope.kind) return false;
   if (scope.kind === "project" || scope.kind === "unclassified") return true;
   return scope.kind === state.scope.kind && "id" in state.scope && scope.id === state.scope.id;
@@ -703,6 +875,14 @@ function isScopeCurrent(scope: Scope): boolean {
 
 function applyScope(scope: Scope): void {
   state.scope = scope;
+  // 在「我的待办」里点模块树：切回当前项目，让表格显示对应范围。
+  if (state.container.kind === "todo" && state.projectId !== null) {
+    state.container = { kind: "project", id: state.projectId };
+    state.addingSubtaskFor = null;
+    subtaskDraft = "";
+    void reload();
+    return;
+  }
   render();
 }
 
@@ -718,11 +898,7 @@ function renderToolbar(groups: Group[]): void {
   const { done, total } = countGroups(visible);
 
   renderFilters();
-
-  const base = currentProject()?.name ?? "我的待办";
-  dom.viewTitle.textContent =
-    inProject && state.scope.kind !== "project" ? `${base} › ${scopeLabel(groups, state.scope)}` : base;
-  dom.viewCount.textContent = total === 0 ? "暂无任务" : `${done}/${total}`;
+  dom.statusCount.textContent = total === 0 ? "暂无任务" : `共 ${total} 项 · 已完成 ${done}`;
 
   // 提示语跟着范围走：新任务会落到哪里，先写清楚，不要让人点完才知道。
   // 「全部」与「默认」的新任务都进默认分组，提示也保持一致。
@@ -912,10 +1088,11 @@ function renderGroup(
   const label = el("span", "group-label");
   label.style.paddingLeft = `${group.depth * 20}px`;
 
-  const caret = el("button", collapsed ? "group-caret is-collapsed" : "group-caret");
+  const caret = el("button", collapsed ? "group-caret is-collapsed has-icon" : "group-caret has-icon");
   caret.type = "button";
   caret.title = collapsed ? "展开" : "收起";
   caret.setAttribute("aria-label", caret.title);
+  caret.append(icon("chevron"));
   caret.addEventListener("click", () => {
     if (collapsed) state.collapsedGroups.delete(key);
     else state.collapsedGroups.add(key);
@@ -1137,6 +1314,15 @@ function renderStatusCell(task: Task): HTMLTableCellElement {
   button.type = "button";
   button.title = `${STATUS_LABELS[task.status]} → 点一下改为${STATUS_LABELS[NEXT_STATUS[task.status]]}`;
   button.setAttribute("aria-label", `状态：${STATUS_LABELS[task.status]}`);
+  button.append(
+    icon(
+      task.status === "done"
+        ? "status-done"
+        : task.status === "doing"
+          ? "status-doing"
+          : "status-todo",
+    ),
+  );
   button.addEventListener("click", () => {
     void cycleStatus(task);
   });
@@ -1179,12 +1365,13 @@ function renderTitleCell(task: Task, options: TaskRowOptions): HTMLTableCellElem
   if (options.childCount > 0) {
     const caret = el(
       "button",
-      collapsed ? "group-caret task-caret is-collapsed" : "group-caret task-caret",
+      collapsed ? "group-caret task-caret is-collapsed has-icon" : "group-caret task-caret has-icon",
     );
     caret.type = "button";
     caret.title = collapsed ? "展开子任务" : "收起子任务";
     caret.setAttribute("aria-label", caret.title);
     caret.setAttribute("aria-expanded", String(!collapsed));
+    caret.append(icon("chevron"));
     caret.addEventListener("click", () => toggleTaskCollapsed(task.id));
     wrap.append(caret);
   } else {
@@ -1200,10 +1387,11 @@ function renderTitleCell(task: Task, options: TaskRowOptions): HTMLTableCellElem
     wrap.append(count);
   }
 
-  const plus = el("button", "subtask-add", "＋");
+  const plus = el("button", "subtask-add");
   plus.type = "button";
   plus.title = "添加子任务";
   plus.setAttribute("aria-label", `给「${task.title}」添加子任务`);
+  plus.append(icon("plus"));
   plus.addEventListener("click", () => openSubtaskInput(task.id));
   wrap.append(plus);
 
@@ -1236,8 +1424,8 @@ function openSubtaskInput(parentId: number): void {
 function renderSubtaskAddRow(parent: Task): HTMLTableRowElement {
   const session = subtaskInputSession;
   const row = el("tr", "row-subtask-add");
-  const cell = el("td");
-  cell.colSpan = 7;
+  row.append(el("td"));
+  const cell = el("td", "cell-title");
 
   const input = el("input", "subtask-input");
   input.value = subtaskDraft;
@@ -1291,6 +1479,7 @@ function renderSubtaskAddRow(parent: Task): HTMLTableRowElement {
 
   cell.append(input);
   row.append(cell);
+  for (let index = 0; index < 5; index += 1) row.append(el("td"));
   return row;
 }
 
@@ -1812,56 +2001,23 @@ function askNote(options: TextOptions): Promise<string | null> {
 // 事件
 // ---------------------------------------------------------------------------
 
-/**
- * 内联新建项目表单的"收回去"：隐藏 + 清空。
- *
- * 提交成功与点外面 / Esc 走同一个出口——只留一种收场方式，免得三种状态
- * （开着有字、开着没字、关着）各自漂移。
- */
-function resetProjectForm(): void {
-  dom.projectForm.hidden = true;
-  dom.projectInput.value = "";
-  document.removeEventListener("mousedown", onProjectFormOutside);
-}
-
-/** 表单外的任何一次按下都把它收回去；按下（而非点击）才算，免得拖选文字也被当成"我不要了"。 */
-function onProjectFormOutside(event: MouseEvent): void {
-  if (event.target instanceof Node && dom.projectForm.contains(event.target)) return;
-  resetProjectForm();
-}
-
-dom.projectAdd.addEventListener("click", () => {
-  dom.projectForm.hidden = false;
-  dom.projectInput.focus();
-  document.addEventListener("mousedown", onProjectFormOutside);
-});
-
-dom.projectInput.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    event.preventDefault();
-    resetProjectForm();
-  }
-});
-
-dom.projectForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  void createProject();
-});
-
 dom.taskForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void createTask();
 });
 
-async function createProject(): Promise<void> {
-  const name = dom.projectInput.value.trim();
-  if (!name) return;
+async function createProjectFlow(): Promise<void> {
+  const name = await askText({
+    title: "新建项目",
+    label: "项目名",
+    value: "",
+    confirmText: "创建",
+  });
+  if (name === null) return;
+
   try {
     const created = await api.createProject(name);
-    resetProjectForm();
-    if (created.id !== null) state.container = { kind: "project", id: created.id };
-    state.scope = { kind: "project" };
-    await reload();
+    await selectProject(created);
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -2020,16 +2176,23 @@ async function deleteProjectFlow(project: Project): Promise<void> {
     if (!confirmed) return;
 
     const wasHere = state.container.kind === "project" && state.container.id === id;
+    const wasCurrentProject = state.projectId === id;
     await api.deleteProject(id);
 
-    if (wasHere) {
-      state.container = { kind: "todo" };
+    if (wasHere || wasCurrentProject) {
+      if (wasHere) state.container = { kind: "todo" };
+      if (wasCurrentProject) state.projectId = null;
       state.scope = { kind: "project" };
       state.collapsedNodes.clear();
       state.collapsedGroups.clear();
       state.collapsedTasks.clear();
       state.addingSubtaskFor = null;
       subtaskDraft = "";
+      try {
+        localStorage.removeItem(PROJECT_STORAGE_KEY);
+      } catch {
+        // 忽略：存储不可用不影响删除本身。
+      }
     }
 
     await reload();
@@ -2052,12 +2215,18 @@ async function resetDatabaseFlow(): Promise<void> {
     await api.resetDatabase();
     // 库已经换了一份：视图回到「我的待办」，旧的分组/折叠键全部失效。
     state.container = { kind: "todo" };
+    state.projectId = null;
     state.scope = { kind: "project" };
     state.collapsedNodes.clear();
     state.collapsedGroups.clear();
     state.collapsedTasks.clear();
     state.addingSubtaskFor = null;
     subtaskDraft = "";
+    try {
+      localStorage.removeItem(PROJECT_STORAGE_KEY);
+    } catch {
+      // 忽略：重置数据库不依赖本地偏好清理成功。
+    }
     closeMenu();
     await reload();
     showNotice("数据库已重置");
@@ -2186,6 +2355,8 @@ function boot(): void {
   document.addEventListener("contextmenu", (event) => {
     event.preventDefault();
   });
+  initTheme();
+  dom.projectBtn.addEventListener("click", openProjectMenu);
   initTooltips();
   initColumnResizing();
   render();
