@@ -42,7 +42,7 @@ import appIcon from "../src-tauri/icons/icon.png";
 const STARTUP_ERROR_PARAM = "startupError";
 
 /** 与 src-tauri/tauri.conf.json 的 version 保持一致。 */
-const APP_VERSION = "0.1.0";
+const APP_VERSION = "0.1.1";
 
 // 状态是三态**循环**：一个字段一个控件，点一下换下一个值。
 const NEXT_STATUS: Record<Status, Status> = { todo: "doing", doing: "done", done: "todo" };
@@ -111,6 +111,10 @@ const state: State = {
 
 /** 内联子任务输入框的草稿：放在状态对象外，无关重绘也不丢正在打的字。 */
 let subtaskDraft = "";
+
+/** 双击范围节点改名：第一次点击会重绘左栏，元素被换掉，原生 dblclick 靠不住；
+    改按“同一节点 400ms 内再次点击”识别，状态放在模块级，重绘不会丢。 */
+let scopeRenameTap: { key: string; at: number } | null = null;
 /** 输入会话号：旧的失焦回调只认自己那一轮，免得点「＋」时误提交上一轮。 */
 let subtaskInputSession = 0;
 /** 首次加载时把上次项目接回来；之后的 reload 不能再覆盖用户当前选择。 */
@@ -973,7 +977,7 @@ function renderSideItem(project: Project): HTMLButtonElement {
         { label: "新建模块", onSelect: () => void createModuleIn(projectId) },
         {
           label: "重命名项目",
-          onSelect: () => void renameNode({ kind: "project", id: projectId, name: project.name }),
+          onSelect: () => renameNode({ kind: "project", id: projectId, name: project.name }),
         },
         { label: "删除项目", onSelect: () => void deleteProjectFlow(project) },
       ],
@@ -982,6 +986,35 @@ function renderSideItem(project: Project): HTMLButtonElement {
   });
 
   return button;
+}
+
+/** 左栏当前项目名：右键菜单（新建模块 / 重命名 / 删除）与双击重命名。 */
+function initProjectHeading(): void {
+  dom.projectHeading.addEventListener("dblclick", () => {
+    const project = currentProject();
+    if (!project || project.isTodo || project.id === null) return;
+    renameNode({ kind: "project", id: project.id, name: project.name });
+  });
+
+  dom.projectHeading.addEventListener("contextmenu", (event) => {
+    // 正在原地改名时不抢输入框的右键。
+    if (event.target instanceof HTMLInputElement) return;
+    const project = currentProject();
+    if (!project || project.isTodo || project.id === null) return;
+    event.preventDefault();
+    const projectId = project.id;
+    openMenu({
+      items: [
+        { label: "新建模块", onSelect: () => void createModuleIn(projectId) },
+        {
+          label: "重命名项目",
+          onSelect: () => renameNode({ kind: "project", id: projectId, name: project.name }),
+        },
+        { label: "删除项目", onSelect: () => void deleteProjectFlow(project) },
+      ],
+      position: { kind: "point", x: event.clientX, y: event.clientY },
+    });
+  });
 }
 
 /**
@@ -1116,13 +1149,31 @@ function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
   const name = el("button", "scope-name", options.label);
   name.type = "button";
   name.title = options.label;
+  if (options.scope.kind === "module" || options.scope.kind === "submodule") {
+    name.dataset.kind = options.scope.kind;
+    name.dataset.id = String(options.scope.id);
+  }
+  // 模块 / 子模块双击名字直接改名；「全部」「默认」只是虚拟范围，没有可改的名字。
+  const scope = options.scope;
   name.addEventListener("click", () => {
-    applyScope(options.scope);
+    if (scope.kind === "module" || scope.kind === "submodule") {
+      const key = `${scope.kind}:${scope.id}`;
+      const now = Date.now();
+      if (scopeRenameTap?.key === key && now - scopeRenameTap.at < 400) {
+        scopeRenameTap = null;
+        renameNode({ kind: scope.kind, id: scope.id, name: options.label });
+        return;
+      }
+      scopeRenameTap = { key, at: now };
+    }
+    applyScope(scope);
   });
 
   row.append(name, el("span", "scope-count", `${options.count.done}/${options.count.total}`));
 
   row.addEventListener("contextmenu", (event) => {
+    // 正在原地改名时不抢输入框的右键。
+    if (event.target instanceof HTMLInputElement) return;
     const items = scopeMenuItems(options);
     if (items.length === 0) return;
     event.preventDefault();
@@ -1148,7 +1199,7 @@ function scopeMenuItems(options: ScopeNodeOptions): MenuItem[] {
         { label: "新建子模块", onSelect: () => void createSubmoduleIn(scope.id) },
         {
           label: "重命名模块",
-          onSelect: () => void renameNode({ kind: "module", id: scope.id, name: label }),
+          onSelect: () => renameNode({ kind: "module", id: scope.id, name: label }),
         },
         { label: "删除模块", onSelect: () => void deleteNodeFlow("module", scope.id, label) },
       ];
@@ -1156,7 +1207,7 @@ function scopeMenuItems(options: ScopeNodeOptions): MenuItem[] {
       return [
         {
           label: "重命名子模块",
-          onSelect: () => void renameNode({ kind: "submodule", id: scope.id, name: label }),
+          onSelect: () => renameNode({ kind: "submodule", id: scope.id, name: label }),
         },
         { label: "删除子模块", onSelect: () => void deleteNodeFlow("submodule", scope.id, label) },
       ];
@@ -2038,17 +2089,30 @@ function beginRename(title: HTMLSpanElement, task: Task): void {
   const cell = title.closest<HTMLTableCellElement>("td");
   if (!cell || cell.querySelector(".title-input")) return;
 
-  const input = el("input", "title-input");
+  // 用 textarea 而不是 input：标题超出一行时，编辑框要跟着换行并长高，
+  // 与只读状态看到的排版一致；Enter 仍然提交，不插入换行。
+  const input = el("textarea", "title-input");
+  input.rows = 1;
   input.value = task.title;
   input.spellcheck = false;
+  input.autocomplete = "off";
   // 父任务的标题在 flex 行里：输入框从标题原位铺到单元格右侧，计数和「＋」先让位。
   const row = title.parentElement;
   if (row?.classList.contains("task-title-row")) {
     row.classList.add("is-renaming");
   }
+
+  // 高度跟着内容走：先归零再读 scrollHeight，换行多一行就长一行。
+  const autosize = (): void => {
+    input.style.height = "0px";
+    input.style.height = `${input.scrollHeight + 2}px`;
+  };
+  input.addEventListener("input", autosize);
+
   title.replaceWith(input);
   input.focus();
   input.select();
+  autosize();
 
   // 回车与失焦可能先后发生，只认第一个结果。
   let settled = false;
@@ -2056,7 +2120,8 @@ function beginRename(title: HTMLSpanElement, task: Task): void {
     if (settled) return;
     settled = true;
 
-    const next = input.value.trim();
+    // 粘贴进来的换行折成空格：标题只做视觉换行，不把换行符写进库。
+    const next = input.value.replace(/\s*\n+\s*/g, " ").trim();
     // 空值或没改：还原原文，不入库（后端也会拒，但没必要发这一趟）。
     if (!commit || next === "" || next === task.title) {
       render();
@@ -2384,23 +2449,90 @@ interface RenameTarget {
   name: string;
 }
 
-async function renameNode(target: RenameTarget): Promise<void> {
-  const name = await askText({
-    title: "重命名",
-    label: `${target.name} → 新名字`,
-    value: target.name,
-    confirmText: "保存",
-  });
-  if (name === null || name === target.name) return;
-
-  try {
-    if (target.kind === "project") await api.renameProject(target.id, name);
-    else if (target.kind === "module") await api.renameModule(target.id, name);
-    else await api.renameSubmodule(target.id, name);
-    await reload();
-  } catch (error) {
-    showNotice(describe(error), "error");
+/**
+ * 结构改名走原地编辑：把名字本身换成输入框，不弹窗、不离开左栏。
+ * 双击名字与右键菜单的「重命名…」都落到这里。
+ */
+function renameNode(target: RenameTarget): void {
+  if (target.kind === "project") {
+    beginProjectRename(target.id, target.name);
+    return;
   }
+  const button = dom.scopeSection.querySelector<HTMLButtonElement>(
+    `.scope-name[data-kind="${target.kind}"][data-id="${target.id}"]`,
+  );
+  if (button) beginScopeRename(button, target.kind, target.id, target.name);
+}
+
+function beginProjectRename(id: number, currentName: string): void {
+  if (dom.projectHeading.querySelector(".side-input")) return;
+  const input = el("input", "side-input heading-input");
+  input.value = currentName;
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  dom.projectHeading.replaceChildren(input);
+  beginInlineEdit(input, currentName, (name) => api.renameProject(id, name));
+}
+
+function beginScopeRename(
+  button: HTMLButtonElement,
+  kind: "module" | "submodule",
+  id: number,
+  currentName: string,
+): void {
+  if (!button.isConnected) return;
+  const input = el("input", "side-input scope-input");
+  input.value = currentName;
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  button.replaceWith(input);
+  beginInlineEdit(input, currentName, (name) =>
+    kind === "module" ? api.renameModule(id, name) : api.renameSubmodule(id, name),
+  );
+}
+
+/** 原地编辑的共同收尾：Enter / 失焦保存，Esc 取消；空值或没改就重绘还原。 */
+function beginInlineEdit(
+  input: HTMLInputElement,
+  original: string,
+  commit: (name: string) => Promise<unknown>,
+): void {
+  let settled = false;
+  const finish = (save: boolean): void => {
+    if (settled) return;
+    settled = true;
+
+    const next = input.value.trim();
+    if (!save || next === "" || next === original) {
+      render();
+      return;
+    }
+
+    void (async () => {
+      try {
+        await commit(next);
+        await reload();
+      } catch (error) {
+        showNotice(describe(error), "error");
+        render(); // 失败也要把输入框收回去，不能停在改了一半的状态
+      }
+    })();
+  };
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  // 点别处等同于保存，和任务标题的原位改名保持一致。
+  input.addEventListener("blur", () => finish(true));
+
+  input.focus();
+  input.select();
 }
 
 /** 删除任务：先问后端会连带删掉几个子任务，再确认。 */
@@ -2675,6 +2807,7 @@ function boot(): void {
   dom.projectBtn.addEventListener("click", openProjectMenu);
   dom.aboutBtn.addEventListener("click", openAboutDialog);
   initTooltips();
+  initProjectHeading();
   initSidebarContextMenu();
   initSidebarResizing();
   initColumnResizing();

@@ -463,13 +463,13 @@ body.col-resizing {
   overflow: hidden;
 }
 
+/* 任务标题按列宽自动换行；长英文 / 链接也允许在任意位置断开。 */
 .task-title {
-  display: inline-block;
+  display: inline;
   max-width: 100%;
-  overflow: hidden;
   font-size: 13px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+  white-space: normal;
   vertical-align: bottom;
 }
 
@@ -498,11 +498,12 @@ body.col-resizing {
   padding-left: calc(28px + 1em);
 }
 
-/* 父任务标题格：箭头 + 标题 + 子任务计数 + 「＋」排在同一行，标题仍可省略 */
+/* 父任务标题格：箭头 + 标题 + 子任务计数 + 「＋」排在同一行；
+   标题换行时其余元素留在第一行，所以按首行对齐而不是垂直居中。 */
 .task-title-row {
   display: flex;
   gap: 4px;
-  align-items: center;
+  align-items: flex-start;
   min-width: 0;
 }
 
@@ -513,6 +514,7 @@ body.col-resizing {
 
 .task-count {
   flex: 0 0 auto;
+  margin-top: 1px;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -525,6 +527,7 @@ body.col-resizing {
   flex: 0 0 14px;
   width: 14px;
   min-height: 14px;
+  margin-top: 4px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -540,6 +543,7 @@ body.col-resizing {
 
 .subtask-add {
   flex: 0 0 auto;
+  margin-top: 2px;
   margin-left: auto;
   width: 18px;
   height: 18px;
@@ -827,8 +831,10 @@ button.note:focus-visible {
   overflow: hidden;
 }
 
-/* 双击标题后就地变输入框：单线条，只靠这圈 1px 边框表示焦点 */
+/* 双击标题后就地变多行文本框：单线条，只靠这圈 1px 边框表示焦点。
+   高度由 JS 按内容撑开，文字随列宽换行，和只读状态看到的一致。 */
 .title-input {
+  display: block;
   width: 100%;
   padding: 2px 6px;
   border: 1px solid var(--accent);
@@ -836,6 +842,10 @@ button.note:focus-visible {
   outline: none;
   font: inherit;
   font-size: 14.5px;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  resize: none;
+  white-space: pre-wrap;
 }
 
 /* 父任务改名时：输入框从原标题位置铺到单元格右侧，计数和「＋」暂时让位 */
@@ -848,6 +858,11 @@ button.note:focus-visible {
 .task-title-row.is-renaming .task-count,
 .task-title-row.is-renaming .subtask-add {
   display: none;
+}
+
+/* 文本框自带 1px 边框 + 2px 内边距，首行比纯文字低 3px */
+.task-title-row.is-renaming .task-caret {
+  margin-top: 6px;
 }
 
 /* 改优先级 / 移动后行会跳到新位置，短暂闪一下背景，让人跟得上（持续 1 秒） */
@@ -1552,6 +1567,8 @@ html[data-platform="linux"] .window-controls {
   font-weight: 600;
   letter-spacing: 0;
   text-transform: none;
+  /* 双击改名：别让浏览器顺手选中项目名的某个词 */
+  user-select: none;
 }
 
 .side-heading[hidden],
@@ -1582,6 +1599,30 @@ html[data-platform="linux"] .window-controls {
 .scope-row.selected .scope-name {
   color: var(--text);
   font-weight: 400;
+}
+
+/* 左栏结构名的原地改名：输入框取代文字本身，不弹窗 */
+.side-input {
+  width: 100%;
+  min-width: 0;
+  padding: 1px 5px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  outline: none;
+  background: var(--bg-editor);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  user-select: text;
+}
+
+.scope-row .side-input {
+  flex: 1;
+  height: 24px;
+}
+
+.side-heading .side-input {
+  font-weight: 600;
 }
 
 .scope-count {

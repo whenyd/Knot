@@ -1,6 +1,6 @@
 [package]
 name = "knot"
-version = "0.1.0"
+version = "0.1.1"
 description = "开发任务的结构化清单"
 authors = ["you"]
 edition = "2024"
