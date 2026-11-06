@@ -984,6 +984,29 @@ function renderSideItem(project: Project): HTMLButtonElement {
   return button;
 }
 
+/**
+ * 左栏空白处右键：同样能给当前项目新建模块。
+ * 项目行 / 范围行 / 开发按钮自己处理右键（已 preventDefault），这里只兜底空白区域。
+ */
+function initSidebarContextMenu(): void {
+  dom.sidebar.addEventListener("contextmenu", (event) => {
+    if (event.defaultPrevented) return;
+    const projectId = state.projectId;
+    if (projectId === null) return;
+    if (
+      event.target instanceof Element &&
+      event.target.closest(".side-item, .scope-row, button, input")
+    ) {
+      return;
+    }
+    event.preventDefault();
+    openMenu({
+      items: [{ label: "新建模块", onSelect: () => void createModuleIn(projectId) }],
+      position: { kind: "point", x: event.clientX, y: event.clientY },
+    });
+  });
+}
+
 function isCurrent(project: Project): boolean {
   if (project.isTodo) return state.container.kind === "todo";
   return project.id !== null && state.projectId === project.id;
@@ -2652,6 +2675,7 @@ function boot(): void {
   dom.projectBtn.addEventListener("click", openProjectMenu);
   dom.aboutBtn.addEventListener("click", openAboutDialog);
   initTooltips();
+  initSidebarContextMenu();
   initSidebarResizing();
   initColumnResizing();
   initColumnSorting();
