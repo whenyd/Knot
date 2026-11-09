@@ -44,7 +44,7 @@ const STARTUP_ERROR_PARAM = "startupError";
 /** 与 src-tauri/tauri.conf.json 的 version 保持一致。 */
 const APP_VERSION = "0.1.1";
 
-// 状态是三态**循环**：一个字段一个控件，点一下换下一个值。
+// 状态三态：状态格点一下循环到下一个；右键「设置状态…」可以直接挑，循环只是快捷方式。
 const NEXT_STATUS: Record<Status, Status> = { todo: "doing", doing: "done", done: "todo" };
 const STATUS_LABELS: Record<Status, string> = { todo: "未开始", doing: "进行中", done: "已完成" };
 const STATUS_ORDER: Status[] = ["todo", "doing", "done"];
@@ -1551,16 +1551,29 @@ function renderTaskRow(task: Task, options: TaskRowOptions): HTMLTableRowElement
   return row;
 }
 
-/** 任务右键菜单：移动 / 升降级（顶层与子任务各一项）与删除。 */
+/** 任务右键菜单：指定状态 / 移动 / 升降级（顶层与子任务各一项）与删除。 */
 function openTaskMenu(task: Task, event: MouseEvent): void {
   const items: MenuItem[] = [];
   const position: MenuPosition = { kind: "point", x: event.clientX, y: event.clientY };
+
+  // 状态格只能循环着找，右键把三态直接摆出来；当前状态打勾。
+  items.push({
+    label: "设置状态…",
+    children: STATUS_ORDER.map((status) => ({
+      label: STATUS_LABELS[status],
+      checked: status === task.status,
+      onSelect: () => void changeStatus(task, status),
+    })),
+  });
+
   if (task.parentTaskId === null) {
     items.push({ label: "移动到…", onSelect: () => void openMoveMenu(task, position) });
     items.push({ label: "降为子任务…", onSelect: () => openDemoteMenu(task, position) });
   } else {
     items.push({ label: "升为父任务", onSelect: () => void promoteTask(task) });
   }
+  // 删除和上面的结构操作隔开，免得在密集菜单里点错。
+  items.push({ type: "separator", label: "" });
   items.push({ label: "删除任务", onSelect: () => void deleteTaskFlow(task) });
   openMenu({ items, position });
 }
@@ -2006,9 +2019,17 @@ async function moveTaskTo(task: Task, target: MoveTarget): Promise<void> {
   }
 }
 
-/** 状态格循环：plan 先问"要不要确认"，needs_confirm 为真才弹窗，再 apply。 */
+/** 状态格点击：三态循环到下一个。 */
 async function cycleStatus(task: Task): Promise<void> {
-  const next = NEXT_STATUS[task.status];
+  await changeStatus(task, NEXT_STATUS[task.status]);
+}
+
+/**
+ * 指定状态（状态格循环与右键「设置状态…」共用）：plan 先问"要不要确认"，
+ * needs_confirm 为真才弹窗，再 apply。目标与当前相同就不写库。
+ */
+async function changeStatus(task: Task, next: Status): Promise<void> {
+  if (next === task.status) return;
   try {
     const plan = await api.planSetStatus(task.id, next);
     let cascade = false;
