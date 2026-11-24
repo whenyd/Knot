@@ -110,6 +110,9 @@ export const api = {
     invoke<Module>("create_module", { projectId, name }),
   createSubmodule: (moduleId: number, name: string) =>
     invoke<Submodule>("create_submodule", { moduleId, name }),
+  /** 调整模块顺序：插到 `beforeId` 之前；`null` = 移到最后。返回新的完整模块树。 */
+  moveModule: (id: number, beforeId: number | null) =>
+    invoke<Module[]>("move_module", { id, beforeId }),
   renameProject: (id: number, name: string) => invoke<Project>("rename_project", { id, name }),
   renameModule: (id: number, name: string) => invoke<Module>("rename_module", { id, name }),
   renameSubmodule: (id: number, name: string) =>

@@ -8,11 +8,11 @@
 
 ## 现状
 
-**已实现（22 条发布命令 + 1 条仅开发版命令）**
+**已实现（23 条发布命令 + 1 条仅开发版命令）**
 
 ```
 list_projects / create_project / rename_project / plan_delete_project / delete_project
-list_modules / create_module / create_submodule / rename_module / rename_submodule
+list_modules / create_module / create_submodule / move_module / rename_module / rename_submodule
 plan_delete_node / delete_node
 list_tasks / create_task / rename_task / set_note / move_task / set_priority
 plan_set_status / apply_set_status
@@ -20,7 +20,7 @@ plan_delete_task / delete_task
 reset_database   // 仅 dev build 注册；release 不注册、前端不显示入口
 ```
 
-界面：左栏（我的待办 + 项目 + 范围树 + **右键菜单 / 双击原地改名**）、固定按模块分组的表格（分组折叠、子树计数、**标题自动换行**）、
+界面：左栏（我的待办 + 项目 + 范围树 + **右键菜单 / 双击原地改名 / 模块拖动排序**）、固定按模块分组的表格（分组折叠、子树计数、**标题自动换行**）、
 状态点击循环三态、优先级浮窗、双击就地改名、**新建任务落入当前范围**、应用内确认框、输入弹窗与
 **多行备注弹窗**、**创建 / 开始 / 结束三列（自动记录、只读）**、**可拖动列宽**、**任务行右键菜单**（指定状态 + 移动到任意归类 + 删除）、
 **三级结构删除**（确认框告知连带任务数，删除后自动回落视图）、
@@ -302,6 +302,21 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 - 状态格的循环入口保留，两者调用同一个 `changeStatus`；「设置状态…」解决“只想退一步 / 多跳一步”时循环两次的麻烦。
 - 「设置状态…」用菜单组件的 `children` + `checked`，与「移动到…」同一套悬停 / 键盘交互；三个状态都列出来，当前项打勾，选当前项直接返回。
 - 完成任务后行因筛选离开视图时，仍复用「任务已完成，已从当前视图隐藏」的轻提示。
+
+### 阶段 14 · 左栏模块排序 — 已完成
+
+| # | 任务 | 改动位置 | 验收 | 依赖 |
+| --- | --- | --- | --- | --- |
+| ~~T42~~ | ✅ **左栏模块拖动排序**（已完成） | `domain::move_module`（归属校验 + 全项目 `sort_order` 重排）→ `commands.rs` / `lib.rs` / `api.ts`；`main.ts` 在模块行上用 Pointer Events 拖动（4px 阈值、中线判断插入点、上下边缘自动滚动、拖完吞一次 click）；`styles.css` 抓手光标与插入指示线 | 模块可拖到任意模块之前或末尾，左栏与表格分组同时换序并落库；子模块跟随模块整体移动、不能单独拖；拖回原位不写库；跨项目 / 不存在的目标被后端拒绝；拖动不会误切范围或折叠模块 | — |
+
+阶段 14 实现决策：
+
+- 只做模块这一层：子模块的归属与顺序在用户心里是“跟着模块走”的，单独拖会让左栏多一维隐藏状态；`sort_order` 本来就按项目内模块排队，直接复用。
+- 用 Pointer Events 而非 HTML5 拖放：左栏行里全是按钮，HTML5 的 `draggable` 在交互控件上行为不稳；指针拖动能自己控制阈值，把单击 / 双击 / 拖动三种手势分开。按下不立即进入拖动态，移动超过 4px 才开始，单击和双击不受影响。
+- 插入位置按模块行中线算：指针在第 i 个模块上半 → 插到它之前；下半 → 插到它之后（等价于第 i+1 个之前）；最后一行下半 → 末尾。子模块行不画线，落在它上面时按所属模块的位置算。
+- 落点等于当前位置（含“紧接自己之后”）时不画指示线、不写库；拖完用一次性捕获阶段的 click 监听吞掉浏览器补发的那一下，避免顺手切换范围或折叠。
+- 命令只报“插到谁前面”（`before_id`，`null` = 末尾），排序号由 `domain.rs` 统一重写成 `0..n-1`；拖到自己前面视为没动。前端不保存任何顺序状态，顺序的唯一真相是库里的 `module.sort_order`，`list_modules` 与 `buildGroups` 都按它来。
+- 验证：后端新增 `moves_modules_within_project` / `move_module_rejects_foreign_target`；mockIPC + 无头 Edge 用真实指针事件拖了“移到最后 / 拖回最前 / 原地小幅拖动”三种，确认命令参数（`beforeId`）、左栏与表格分组顺序、以及选中范围没有被动过。
 
 ---
 

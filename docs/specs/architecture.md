@@ -159,6 +159,7 @@ apply_set_status(id, status, cascade: bool) -> { changed: [task], notices: [stri
 create_project(name) / rename_project(id, name) / plan_delete_project(id) -> { task_count } / delete_project(id)
 create_module(project_id, name) / rename_module(id, name)
 create_submodule(module_id, name) / rename_submodule(id, name)
+move_module(id, before_id?) -> [module]   // before_id = null 表示移到最后；返回项目新的模块树
 
 // 删除结构节点（模块和子模块的 id 各自独立，必须带 kind 区分）
 plan_delete_node(kind, id) -> { task_count } / delete_node(kind, id)   // kind = 'module' | 'submodule'
@@ -175,6 +176,8 @@ delete_task(id) -> { notices }
 **字段名约定**：跨 IPC 的结构一律 camelCase（Rust 侧 `#[serde(rename_all = "camelCase")]`，枚举值小写），前端类型与之逐字对应。字段名归后端所有，前端不另行映射。`domain.rs` 里有几条单测专门盯着这个契约。
 
 **归属参数归后端校验**：`create_task` 接受 `module_id`/`submodule_id`，由 `domain.rs` 验证「模块属于该项目」「子模块属于该模块」「「我的待办」的任务不能带模块」。前端只负责把当前范围翻译成这两个 id（`resolveTarget`），不代替后端判定合法性。
+
+**模块顺序规则**：`move_module(id, before_id?)` 在 `domain.rs` 里完成归属校验与排序号分配——两个模块必须存在且属于同一项目（跨项目直接报错），`before_id` 为 `null` 表示移到末尾，等于自己的 id 视为没动。真正发生变化时，把该项目全部模块的 `sort_order` 重写成 `0..n-1`（顺带修掉历史数据里可能重复的排序号）；未变化则不写库。子模块不参与这层排序，它们跟随自己的模块移动。前端不计算排序号，只报“插到谁前面”。
 
 **子任务的归属规则**：给了 `parent_task_id` 时，后端拒绝「父任务已有父任务」（只允许一层）与「父任务不在当前容器」；子任务落库时 `module_id`/`submodule_id` 一律为 NULL（调用方传了也忽略），`project_id` 跟随父任务，排序号按该父任务下 `MAX+1` 单独排队。父任务的分类就是子任务的分类，不需要也不允许冗余一份。
 
@@ -198,6 +201,7 @@ delete_task(id) -> { notices }
 - **内联新建项目表单**是创建流程里的非弹窗输入（左栏「＋ 新建项目」；结构改名同样不弹窗，但走上面的 `.side-input`）。它只有一个收场出口 `resetProjectForm()`（隐藏 + 清空）：提交成功、点表单外（`document` 上的 `mousedown`，表单内不关）、Esc 都走它；打开时挂监听、关闭时摘掉，不留常驻监听。已输入的文字跟随表单一起丢弃——不保留草稿，也不计入状态。
 - **菜单只有一份实现**：`src/menu.ts` 负责弹出、定位、关闭，三处共用——左栏项目名/范围节点的右键菜单、任务行的右键菜单、优先级的 `.menu` 浮窗。入口只给 `items` 和位置（指针点或元素锚点），菜单项的行为由调用方提供。任务行右键给顶层任务「设置状态… / 移动到… / 降为子任务… / 删除任务」，给子任务「设置状态… / 升为父任务 / 删除任务」；「设置状态…」展开三态子面板，当前状态打勾，删除前有一条分隔线。带 `children` 的条目（「移动到…」「降为子任务…」）不内联展开，而是悬停/点击后在父行右侧弹出独立的 `.menu` 子面板；右侧放不下翻到左侧，父面板布局不重排。一次只保留一条面板路径：打开同级子面板会先关掉旧的；根面板滚动会关掉子面板。打开时先关掉上一个；点外面 / Esc / 滚屏 / 窗口失焦关闭；上下键在当前面板内循环，右键进子面板、左键退回父行，Esc 把焦点还给打开它的按钮。锚点定位在下方放不下时翻到上方，并夹在视口内。原生 `contextmenu` 在应用内默认被 `preventDefault()`（`boot()` 里统一挂一次），只有左栏的 `contextmenu` 监听会打开上述菜单：项目名（`#project-heading`，给新建模块 / 重命名项目 / 删除项目）与范围节点各管自己那一段，`dom.sidebar` 上再挂一个兜底监听，处理项目名、范围行与按钮之外的空白区域——`state.projectId` 非 `null`（左栏正显示某个项目及其模块树）时给「新建模块」（项目名与范围行已 `preventDefault()`，兜底监听靠 `event.defaultPrevented` 让位，不会弹两份）。切到「我的待办」不清空 `projectId`，因此左栏仍可见的项目也能从空白处建模块；没有项目上下文时空白处不弹。
 - **结构改名入口**：双击项目名 / 模块名 / 子模块名与右键「重命名…」都走同一个 `renameNode`，把名字原地换成 `.side-input`，不弹窗。Enter 或失焦保存，Esc 取消，空值 / 没改动就 `render()` 还原；提交成功调 `rename_project` / `rename_module` / `rename_submodule` 后 `reload()`，失败提示并用 `render()` 收回输入框。项目名没有单击行为，直接用原生 `dblclick`；模块 / 子模块的单击会 `applyScope` → `render()` 换掉节点，原生 `dblclick` 在替换后的元素上不可靠，改在 click 里用模块级 `scopeRenameTap` 识别“同一节点 400ms 内第二次点击”，第一次点击仍照常切换视图。「全部」「默认」是虚拟范围，不挂改名。
+- **模块拖动排序**：只有模块行带 `data-module-id`，子模块行不参与拖动。用 Pointer Events 而不是 HTML5 拖放：按下只记录起点，指针移动超过 4px 才进入拖动态，避免和“单击切范围 / 双击改名”抢事件。拖动中用每个模块行的竖直中线判断插入位置（插到第几行之前，最后一行中线以下就是末尾），被拖行降透明度、目标位置浮出 2px 强调色细线；落在自己当前的位置（或紧接自己的位置）不画线、也不发命令。拖到左栏上下边缘时自动滚动。松手把“插到谁前面”交给 `move_module`（`before_id` 为 `null` 即末尾），成功后 `reload()`；拖动状态只在本次交互里存在，不写 `localStorage`。拖完 250ms 内吞掉一次 `click`，防止浏览器补发的点击顺手切换范围或折叠模块。拖到子模块行上时按它所属模块的位置计算，整棵模块（含子模块）一起移动。
 - **删除的回落**：删除任务只是重取当前容器；删除模块/子模块时，如果当前 `scope` 正落在被删的子树里，回到项目「全部」；删除项目时，如果当前 `container` 正是它，回到「我的待办」。删除前都用 `plan_*` 的条数填确认框，不在前端重算级联范围。
 - **子任务渲染**：`buildGroups` 继续跳过 `parentTaskId !== null` 的任务（它们不占分组行，分组计数只算父任务）；渲染时另建 `parentTaskId → tasks` 的索引，父任务行后按同一套排序（优先级 → `sort_order`）渲染缩进子行。父任务行默认展开，`collapsedTasks` 只记本次会话里收起的那几个；父任务标题前的折叠箭头与行内「＋」只出现在顶层任务上。
 - **行内子任务输入**：`addingSubtaskFor` 同时只有一个父任务，输入草稿放在 `subtaskDraft`（状态对象外，重绘不丢）。回车保存并保持输入行打开（可连续添加），Esc 取消，失焦保存非空内容；失焦回调延后一拍并检查 `input.isConnected`，避免重绘换掉输入框时被误当成提交。

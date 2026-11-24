@@ -1601,6 +1601,50 @@ html[data-platform="linux"] .window-controls {
   font-weight: 400;
 }
 
+/* 模块行可拖动排序：抓手光标只给模块；子模块跟随自己的模块，不单独拖。 */
+.scope-row[data-module-id] {
+  position: relative;
+  cursor: grab;
+  user-select: none;
+}
+
+.scope-row[data-module-id] .scope-name {
+  cursor: inherit;
+}
+
+.scope-row[data-module-id].is-dragging {
+  cursor: grabbing;
+  opacity: 0.45;
+}
+
+/* 拖动时整页保持抓取光标，避免经过别处又变回箭头。 */
+body.is-module-dragging,
+body.is-module-dragging * {
+  cursor: grabbing;
+  user-select: none;
+}
+
+/* 插入位置：模块行的上边缘或下边缘浮出一条强调色细线。 */
+.scope-row.drop-before::before,
+.scope-row.drop-after::after {
+  position: absolute;
+  right: 6px;
+  left: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  content: "";
+  pointer-events: none;
+}
+
+.scope-row.drop-before::before {
+  top: -2px;
+}
+
+.scope-row.drop-after::after {
+  bottom: -2px;
+}
+
 /* 左栏结构名的原地改名：输入框取代文字本身，不弹窗 */
 .side-input {
   width: 100%;

@@ -29,6 +29,7 @@ pub fn run() {
             commands::list_modules,
             commands::create_module,
             commands::create_submodule,
+            commands::move_module,
             commands::rename_project,
             commands::rename_module,
             commands::rename_submodule,

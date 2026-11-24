@@ -39,6 +39,16 @@ pub fn create_submodule(
     domain::create_submodule(&db.conn(), module_id, &name)
 }
 
+/// 调整模块顺序：插到 `before_id` 之前，`None` = 移到最后。
+#[tauri::command]
+pub fn move_module(
+    db: State<'_, Db>,
+    id: i64,
+    before_id: Option<i64>,
+) -> Result<Vec<Module>, String> {
+    domain::move_module(&db.conn(), id, before_id)
+}
+
 #[tauri::command]
 pub fn rename_project(db: State<'_, Db>, id: i64, name: String) -> Result<Project, String> {
     domain::rename_project(&db.conn(), id, &name)

@@ -398,6 +398,80 @@ pub fn create_submodule(conn: &Connection, module_id: i64, name: &str) -> Res<Su
     })
 }
 
+/// 调整模块在项目内的顺序：把 `id` 插到 `before_id` 之前，`None` 表示移到最后。
+///
+/// 只允许同一项目内的模块互相排序；两个 id 都必须存在。排完把整个项目的
+/// `sort_order` 重写成 `0..n-1`，顺带修掉历史数据里可能重复的排序号。
+/// 子模块跟着自己的模块走，不参与这层排序。
+pub fn move_module(conn: &Connection, id: i64, before_id: Option<i64>) -> Res<Vec<Module>> {
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM module WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|err| match err {
+            rusqlite::Error::QueryReturnedNoRows => format!("模块 {id} 不存在"),
+            other => db_err(other),
+        })?;
+
+    // 拖到自己前面等于没动，直接返回当前顺序，不白写一遍排序号。
+    if before_id == Some(id) {
+        return list_modules(conn, project_id);
+    }
+
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+
+    if let Some(target) = before_id {
+        let target_project: i64 = tx
+            .query_row(
+                "SELECT project_id FROM module WHERE id = ?1",
+                params![target],
+                |row| row.get(0),
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => format!("模块 {target} 不存在"),
+                other => db_err(other),
+            })?;
+        if target_project != project_id {
+            return Err("只能在同一项目内调整模块顺序".to_string());
+        }
+    }
+
+    let ids: Vec<i64> = {
+        let mut stmt = tx
+            .prepare("SELECT id FROM module WHERE project_id = ?1 ORDER BY sort_order, id")
+            .map_err(db_err)?;
+        stmt.query_map(params![project_id], |row| row.get(0))
+            .map_err(db_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db_err)?
+    };
+
+    let mut reordered: Vec<i64> = ids.iter().copied().filter(|&other| other != id).collect();
+    let insert_at = match before_id {
+        Some(target) => reordered
+            .iter()
+            .position(|&other| other == target)
+            .ok_or_else(|| format!("模块 {target} 不存在"))?,
+        None => reordered.len(),
+    };
+    reordered.insert(insert_at, id);
+
+    if reordered != ids {
+        for (index, module_id) in reordered.iter().enumerate() {
+            tx.execute(
+                "UPDATE module SET sort_order = ?1 WHERE id = ?2",
+                params![index as i64, module_id],
+            )
+            .map_err(db_err)?;
+        }
+    }
+
+    tx.commit().map_err(db_err)?;
+    list_modules(conn, project_id)
+}
+
 pub fn rename_project(conn: &Connection, id: i64, name: &str) -> Res<Project> {
     rename_row(conn, "project", id, name, "项目", "项目名")?;
     load_project(conn, id)
@@ -1713,6 +1787,78 @@ mod tests {
         let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
         assert!(create_submodule(&conn, module.id, "   ").is_err());
+    }
+
+    /// 左栏拖动排序：可以插到任意模块之前，也可以移到最后；
+    /// 排完排序号是连续的 `0..n-1`，新建模块仍追加在末尾。
+    #[test]
+    fn moves_modules_within_project() {
+        let conn = conn();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
+        let auth = create_module(&conn, project_id, "认证").unwrap();
+        let billing = create_module(&conn, project_id, "计费").unwrap();
+        let report = create_module(&conn, project_id, "报表").unwrap();
+
+        let names = |modules: &[Module]| modules.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+
+        // 最后一个拖到最前
+        let modules = move_module(&conn, report.id, Some(auth.id)).unwrap();
+        assert_eq!(names(&modules), vec!["报表", "认证", "计费"]);
+
+        // 拖到中间：计费插到认证之前
+        let modules = move_module(&conn, billing.id, Some(auth.id)).unwrap();
+        assert_eq!(names(&modules), vec!["报表", "计费", "认证"]);
+
+        // None = 移到最后
+        let modules = move_module(&conn, report.id, None).unwrap();
+        assert_eq!(names(&modules), vec!["计费", "认证", "报表"]);
+
+        // 拖到自己之前是 no-op，不改变顺序
+        let modules = move_module(&conn, billing.id, Some(billing.id)).unwrap();
+        assert_eq!(names(&modules), vec!["计费", "认证", "报表"]);
+
+        let orders: Vec<i64> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT sort_order FROM module WHERE project_id = ?1 ORDER BY sort_order, id",
+                )
+                .unwrap();
+            stmt.query_map(params![project_id], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(orders, vec![0, 1, 2], "排序号重排成连续值");
+
+        // 新建模块仍然落在末尾，不会和已有排序号撞上
+        let new_module = create_module(&conn, project_id, "通知").unwrap();
+        let modules = list_modules(&conn, project_id).unwrap();
+        assert_eq!(
+            modules.last().map(|m| m.id),
+            Some(new_module.id),
+            "新模块追加在最后"
+        );
+    }
+
+    /// 模块只能和同一项目内的模块互相排序；跨项目或不存在都报错，且顺序不变。
+    #[test]
+    fn move_module_rejects_foreign_target() {
+        let conn = conn();
+        let project_a = create_project(&conn, "A").unwrap().id.unwrap();
+        let project_b = create_project(&conn, "B").unwrap().id.unwrap();
+        let auth = create_module(&conn, project_a, "认证").unwrap();
+        let billing = create_module(&conn, project_a, "计费").unwrap();
+        let outsider = create_module(&conn, project_b, "别的项目").unwrap();
+
+        assert!(move_module(&conn, auth.id, Some(outsider.id)).is_err());
+        assert!(move_module(&conn, auth.id, Some(999)).is_err());
+        assert!(move_module(&conn, 999, Some(billing.id)).is_err());
+
+        let modules = list_modules(&conn, project_a).unwrap();
+        assert_eq!(
+            modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["认证", "计费"]
+        );
     }
 
     #[test]

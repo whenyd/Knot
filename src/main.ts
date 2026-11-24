@@ -115,6 +115,21 @@ let subtaskDraft = "";
 /** 双击范围节点改名：第一次点击会重绘左栏，元素被换掉，原生 dblclick 靠不住；
     改按“同一节点 400ms 内再次点击”识别，状态放在模块级，重绘不会丢。 */
 let scopeRenameTap: { key: string; at: number } | null = null;
+
+/** 左栏模块拖动排序：指针按下只记起点，移动超过阈值才进入拖动态，
+    免得和“单击切换范围”抢事件。一次只拖一个模块。 */
+interface ModuleDrag {
+  id: number;
+  row: HTMLElement;
+  startX: number;
+  startY: number;
+  active: boolean;
+  /** 插入位置：在模块行序列里的下标；null = 放在当前位置（不会改变顺序）。 */
+  insertion: number | null;
+}
+let moduleDrag: ModuleDrag | null = null;
+const MODULE_DRAG_THRESHOLD = 4;
+
 /** 输入会话号：旧的失焦回调只认自己那一轮，免得点「＋」时误提交上一轮。 */
 let subtaskInputSession = 0;
 /** 首次加载时把上次项目接回来；之后的 reload 不能再覆盖用户当前选择。 */
@@ -1155,6 +1170,13 @@ function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
   }
   // 模块 / 子模块双击名字直接改名；「全部」「默认」只是虚拟范围，没有可改的名字。
   const scope = options.scope;
+  if (scope.kind === "module") {
+    // 模块行可以上下拖动排序；子模块跟随自己的模块，不单独拖。
+    row.dataset.moduleId = String(scope.id);
+    row.addEventListener("pointerdown", (event) =>
+      beginModuleDrag(event, scope.id, row),
+    );
+  }
   name.addEventListener("click", () => {
     if (scope.kind === "module" || scope.kind === "submodule") {
       const key = `${scope.kind}:${scope.id}`;
@@ -1181,6 +1203,146 @@ function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
   });
 
   return row;
+}
+
+/** 当前渲染出的模块行，按左栏从上到下的顺序。子模块行不在其中。 */
+function moduleRows(): HTMLElement[] {
+  return Array.from(dom.scopeSection.querySelectorAll<HTMLElement>(".scope-row[data-module-id]"));
+}
+
+function beginModuleDrag(event: PointerEvent, id: number, row: HTMLElement): void {
+  if (event.button !== 0) return;
+  // 原地改名时让输入框自己处理指针；右键留给菜单。
+  if (event.target instanceof HTMLInputElement) return;
+  if (moduleDrag !== null) return;
+
+  moduleDrag = {
+    id,
+    row,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: false,
+    insertion: null,
+  };
+  document.addEventListener("pointermove", onModuleDragMove, { passive: false });
+  document.addEventListener("pointerup", endModuleDrag);
+  document.addEventListener("pointercancel", endModuleDrag);
+}
+
+function onModuleDragMove(event: PointerEvent): void {
+  const drag = moduleDrag;
+  if (!drag) return;
+
+  if (!drag.active) {
+    const moved = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+    if (moved < MODULE_DRAG_THRESHOLD) return;
+    drag.active = true;
+    drag.row.classList.add("is-dragging");
+    document.body.classList.add("is-module-dragging");
+  }
+
+  event.preventDefault();
+  autoScrollSidebar(event.clientY);
+  updateModuleDropIndicator(moduleRows(), event.clientY);
+}
+
+/**
+ * 指针落在第几行之前：逐个比较模块行的中线。落在最后一行中线以下就是序列末尾。
+ * 子模块行不参与判断，拖到子模块上会按它所属模块的位置算。
+ */
+function moduleDropIndex(rows: readonly HTMLElement[], clientY: number): number {
+  for (let index = 0; index < rows.length; index += 1) {
+    const rect = rows[index].getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) return index;
+  }
+  return rows.length;
+}
+
+function updateModuleDropIndicator(rows: readonly HTMLElement[], clientY: number): void {
+  const drag = moduleDrag;
+  if (!drag) return;
+
+  clearModuleDropIndicator();
+  const dragIndex = rows.findIndex((row) => Number(row.dataset.moduleId) === drag.id);
+  const insertion = moduleDropIndex(rows, clientY);
+
+  // 插在自己前面、或紧接自己后面，都等于没动：不画线，也不写库。
+  if (dragIndex !== -1 && (insertion === dragIndex || insertion === dragIndex + 1)) {
+    drag.insertion = null;
+    return;
+  }
+
+  drag.insertion = insertion;
+  if (insertion < rows.length) {
+    rows[insertion].classList.add("drop-before");
+  } else if (rows.length > 0) {
+    rows[rows.length - 1].classList.add("drop-after");
+  }
+}
+
+function clearModuleDropIndicator(): void {
+  for (const row of dom.scopeSection.querySelectorAll(".scope-row")) {
+    row.classList.remove("drop-before", "drop-after");
+  }
+}
+
+/** 拖到左栏上下边缘时继续滚，免得模块多到拖不过去。 */
+function autoScrollSidebar(clientY: number): void {
+  const rect = dom.sidebar.getBoundingClientRect();
+  const edge = 24;
+  if (clientY < rect.top + edge) dom.sidebar.scrollTop -= 10;
+  else if (clientY > rect.bottom - edge) dom.sidebar.scrollTop += 10;
+}
+
+function endModuleDrag(event: PointerEvent): void {
+  const drag = moduleDrag;
+  moduleDrag = null;
+  document.removeEventListener("pointermove", onModuleDragMove);
+  document.removeEventListener("pointerup", endModuleDrag);
+  document.removeEventListener("pointercancel", endModuleDrag);
+  if (!drag) return;
+
+  clearModuleDropIndicator();
+  drag.row.classList.remove("is-dragging");
+  document.body.classList.remove("is-module-dragging");
+  if (!drag.active) return;
+
+  // 拖完浏览器还会补一个 click；别让它顺手切了范围或折叠了分组。
+  swallowNextClick();
+
+  // 手势被系统打断（pointercancel）：只收拾视觉状态，不提交顺序。
+  if (event.type === "pointercancel") return;
+
+  const insertion = drag.insertion;
+  if (insertion === null) return;
+
+  const rows = moduleRows();
+  const next = insertion < rows.length ? rows[insertion] : undefined;
+  const beforeId = next ? Number(next.dataset.moduleId) : null;
+  void persistModuleOrder(drag.id, beforeId);
+}
+
+/** 吞掉拖动结束后紧跟的那一次 click（左栏行上的单击、折叠箭头都算）。 */
+function swallowNextClick(): void {
+  const handler = (event: MouseEvent): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    document.removeEventListener("click", handler, true);
+    window.clearTimeout(timer);
+  };
+  const timer = window.setTimeout(() => {
+    document.removeEventListener("click", handler, true);
+  }, 250);
+  document.addEventListener("click", handler, true);
+}
+
+async function persistModuleOrder(id: number, beforeId: number | null): Promise<void> {
+  try {
+    await api.moveModule(id, beforeId);
+    await reload();
+  } catch (error) {
+    showNotice(describe(error), "error");
+  }
 }
 
 /** 右键某个范围节点时能做什么。结构建在哪一级，菜单就长在哪一级。 */
