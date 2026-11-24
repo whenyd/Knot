@@ -23,7 +23,7 @@ reset_database   // registered in dev builds only; not registered in release, an
 ```
 
 Interface: sidebar (My Tasks + projects + scope tree + **right-click menus / double-click in-place rename / module drag reordering**), a table always grouped by module (group collapse, subtree counts, **automatic title wrapping**),
-clicking status cycles the three states, priority popover, double-click in-place rename, **new tasks land in the current scope**, in-app confirmation dialogs, input dialogs and
+clicking status cycles the three states, priority popover, double-click in-place rename, **new tasks land in the current scope, plus two module / priority dropdowns to the right of the input**, in-app confirmation dialogs, input dialogs and
 **multi-line note dialogs**, **three columns for Created / Start / End (recorded automatically, read-only)**, **draggable column widths**, **task row right-click menu** (set status + move to any classification + delete),
 **three-level structure deletion** (the confirmation dialog states the number of affected tasks; the view falls back automatically after deletion),
 **one level of subtasks** (inline "+" on the parent row for continuous adding, indented by 4 spaces, expanded by default and collapsible),
@@ -46,6 +46,7 @@ clicking status cycles the three states, priority popover, double-click in-place
 | Default window width | ✅ Done (Phase 9 T26) |
 | Adjustable column widths | ✅ Done (Phase 9 T27) |
 | Task right-click menu (status / move / delete) | ✅ Done (Phase 9 T28, Phase 13 T41) |
+| Quick-add module / priority dropdowns (two) | ✅ Done (Phase 20 T53) |
 | Subtasks (one level) | ✅ Done (Phase 4 T10/T11) |
 | Parent-child status aggregation | ✅ Done (Phase 4 T12–T14) |
 | Parent-child conversion (demote to subtask / promote to top level) | ✅ Done (Phase 9 T37) |
@@ -402,6 +403,20 @@ Stage 19 implementation decisions:
 - Retargeting re-aggregates both the old and the new parent, so `parentProposals` changes from a single value to an array; targeting the current parent is a no-op.
 - The frontend reuses the same candidate-parent tree and excludes the current parent and every completed task; targets may be parents that already have subtasks or leaf tasks. The toast says "Moved … under …", and priority is still clamped to the new parent's level.
 - New backend tests: `subtask_can_move_to_another_parent`, `retargeting_a_subtask_can_propose_both_parents`, and the `ParentStatusProposal` wire-shape test.
+
+### Stage 20 · Quick-add module / priority — Completed
+
+| # | Task | Files | Acceptance | Depends on |
+| --- | --- | --- | --- | --- |
+| ~~T53~~ | ✅ **Split into two dropdowns, module and priority, to the right of the quick-add input** (done) | `#task-form` in `index.html` (`#task-module` / `#task-priority`) + `composer` / `openComposerModuleMenu` / `openComposerPriorityMenu` / `resetComposer` in `main.ts`; `priority` added to `create_task` in `api.ts`, `commands.rs` and `domain.rs`; new copy in `messages.zh.ts` / `messages.en.ts` | The module follows the current scope by default ("All" → Default, a module / submodule → that node), and priority defaults to Medium; any module / submodule and all three priority levels can be chosen; both return to their defaults after an add and when the scope or project changes; when the task lands outside the current view, a toast says so | — |
+
+Stage 20 implementation decisions:
+
+- `composer` is session-only frontend state: it is not written to the database or `localStorage`. It resets after a successful add, in `applyScope`, `selectProject`, database reset, and view fallbacks caused by deletion.
+- Module and priority are two independent dropdowns, each reusing a flat `openMenu` panel: submodules appear as `Module › Submodule`, avoiding nested side panels that would overflow at the bottom of the window; in "My Tasks" the module panel only offers "Default".
+- `create_task` takes `priority` explicitly from the caller; when creating a subtask, `domain.rs` still clamps it to the parent's level, sharing the same ceiling rule as `set_priority`.
+- A selection redraws only the trigger and the input placeholder, not the table; when the task lands where the current view cannot show it (another module or hidden by filters), a 3-second toast says where it went.
+- Verification: a stateful mockIPC backend plus headless Edge covered "All → Default · Mid", "change priority / module → create arguments", "switch to a module scope → default follows", and "create outside the scope → toast"; new backend tests `create_task_keeps_requested_priority` / `create_subtask_priority_is_clamped_to_parent`.
 
 ---
 

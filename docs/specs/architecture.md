@@ -148,7 +148,7 @@ list_modules(project_id)              -> [{ id, name, submodules: [...] }]
 list_tasks(container)                 -> [task]   // container = { kind: 'todo' } | { kind: 'project', id }
 
 // 写 · 任务
-create_task({ container, module_id?, submodule_id?, parent_task_id?, title }) -> { task, notices }
+create_task({ container, module_id?, submodule_id?, parent_task_id?, title, priority }) -> { task, notices }
 rename_task(id, title)                              // 就地编辑；trim 后为空则拒绝
 set_note(id, note)
 set_priority(id, priority)                            // 子任务不能高于父任务；父任务降档级联下调子任务
@@ -181,7 +181,7 @@ delete_task(id) -> { notices, parent_proposals? }
 
 **字段名约定**：跨 IPC 的结构一律 camelCase（Rust 侧 `#[serde(rename_all = "camelCase")]`，枚举值小写），前端类型与之逐字对应。字段名归后端所有，前端不另行映射。`domain.rs` 里有几条单测专门盯着这个契约。
 
-**归属参数归后端校验**：`create_task` 接受 `module_id`/`submodule_id`，由 `domain.rs` 验证「模块属于该项目」「子模块属于该模块」「「我的待办」的任务不能带模块」。前端只负责把当前范围翻译成这两个 id（`resolveTarget`），不代替后端判定合法性。
+**归属参数归后端校验**：`create_task` 接受 `module_id`/`submodule_id`，由 `domain.rs` 验证「模块属于该项目」「子模块属于该模块」「「我的待办」的任务不能带模块」。前端只负责把当前范围翻译成这两个 id（`resolveTarget`），不代替后端判定合法性。`priority` 由调用方显式给出（前端默认 `mid`）；创建子任务时 `domain.rs` 仍把它压到不高于父任务的档位，与 `set_priority` 共用同一条上限规则。
 
 **模块顺序规则**：`move_module(id, before_id?)` 在 `domain.rs` 里完成归属校验与排序号分配——两个模块必须存在且属于同一项目（跨项目直接报错），`before_id` 为 `null` 表示移到末尾，等于自己的 id 视为没动。真正发生变化时，把该项目全部模块的 `sort_order` 重写成 `0..n-1`（顺带修掉历史数据里可能重复的排序号）；未变化则不写库。子模块不参与这层排序，它们跟随自己的模块移动。前端不计算排序号，只报“插到谁前面”。
 
@@ -191,11 +191,12 @@ delete_task(id) -> { notices, parent_proposals? }
 
 **父子互转规则**：`reparent_task` 用一个命令处理挂到父任务（`Some(target_id)`）与升为顶层（`None`）两个方向，事务内校验并更新，成功后重算受影响父任务的状态。`Some(target_id)` 的目标必须是当前容器内、没有父任务且不是自己的任务；被移动的任务必须没有子任务，否则会出现孙任务，直接报错。顶层任务挂到目标下是降级；已经是子任务的任务挂到另一个目标下是**改挂父任务**（同一容器内），原父任务与新父任务都会重新聚合，可能同时返回两条 `parent_proposals`。挂好后清空 `module_id`/`submodule_id`，`project_id` 跟随目标，排序号取目标子任务 `MAX+1`；原优先级高于目标时压到目标档位；目标与当前父任务相同视为没动。升级（`None`）只接受有父任务的任务：清空 `parent_task_id`，继承原父任务的 `project_id`/`module_id`/`submodule_id`，排序号取该顶层分组 `MAX+1`。两种情况都不改任务自己的状态与时间；父任务聚合到 `done` 时只返回确认建议。
 
-**默认值归属**：`status`/`priority` 的默认值由 `domain.rs` 在 INSERT 时显式写出，schema 的 `DEFAULT` 只作兜底。同一条规则不在两处表达，改默认值只有一个地方要动。
+**默认值归属**：`status` 的默认值由 `domain.rs` 在 INSERT 时显式写出；`priority` 由调用方传入（快速录入的下拉默认 `mid`），子任务上限仍由 `domain.rs` 夹紧。schema 的 `DEFAULT` 只作兜底，同一条规则不在两处表达。
 
 ## 前端结构
 
 - **视图状态**：`container`（我的待办 / 某个项目）、`scope`（全部 / 某模块 / 某子模块 / 默认）、`statusFilter: Set<Status>`、`priorityFilter: Set<Priority>`、`sort: TaskSort | null`（表头列排序）、`collapsedNodes: Set<nodeId>`（左栏范围树收起的模块）。筛选与列排序在本次会话内跨范围、跨项目保留；左栏宽度单独存 `localStorage`（`knot.sidebarWidth.v1`）。
+- **快速录入的模块 / 优先级**：`composer = { target, priority }` 是模块级状态，只作用于下一条任务，不写库也不存本地。`target` 默认取 `resolveTarget(buildGroups(...), scope)`（"全部" / "默认" → 默认分组，模块 / 子模块 → 当前节点）；`priority` 默认 `mid`。输入框右侧是**两个独立按钮**，各自用 `openMenu` 打开一个扁平面板（模块面板在"我的待办"里只有「默认」），选中后只重绘对应按钮与占位语。添加成功、`applyScope`、`selectProject`、删库重建以及删除导致的视图回落都会调用 `resetComposer()`；`composerTargetValid()` 在渲染时兜住已删除的模块 / 子模块。任务落在当前视图看不到的位置时，`reload()` 后用 `tr[data-task-id]` 判断并给一条 `toast.taskAddedElsewhere` 轻提示。
 - **语言状态**：`src/i18n/index.ts` 持有模块级的当前语言；模式（`zh` / `en` / `system`）存 `localStorage`（`knot.language.v1`），`system` 只在启动时按 `navigator.language` 解析一次。切换语言时写存储、更新 `<html lang>` 与 `data-language`、重跑 `applyStaticTranslations()`、刷新主题/语言/最大化按钮文字，再走一次全量 `render()`；同时清空列宽缓存，让新语言下的 `COLUMN_MIN` 重新夹紧已存宽度。语言切换会丢弃正在进行的行内编辑，这是接受的取舍。
 - **一次渲染只建一棵树**：`buildGroups` 的结果同时给左栏范围树算计数、给表格做分组，`selectScope` 再把范围套上去——同一棵树不会被算两遍、更不会两份不一致。
 - **两处折叠互不影响**：左栏范围树的收起（`collapsedNodes`）只管树的显示，表格分组行的收起（`collapsedGroups`）只管表格的行。一个是导航，一个是阅读密度。

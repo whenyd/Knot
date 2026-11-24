@@ -16,6 +16,7 @@ import {
   type ParentStatusProposal,
   type Priority,
   type Project,
+  type ScopeTarget,
   type Status,
   type Task,
 } from "./api";
@@ -143,6 +144,12 @@ const state: State = {
 /** Draft of the inline subtask input: kept outside the state object, so unrelated redraws do not lose typing. */
 let subtaskDraft = "";
 
+/** Choices for the next quick-added task only. Reset to the scope defaults when the view changes or after adding. */
+let composer: { target: ScopeTarget; priority: Priority } = {
+  target: { moduleId: null, submoduleId: null },
+  priority: "mid",
+};
+
 /** Double-click a scope node to rename: the first click redraws the sidebar and replaces the element, so native dblclick is unreliable;
     instead detect "same node clicked again within 400ms"; state is module-level so redraws do not lose it. */
 let scopeRenameTap: { key: string; at: number } | null = null;
@@ -219,6 +226,10 @@ const dom = {
   empty: must<HTMLParagraphElement>("empty"),
   taskForm: must<HTMLFormElement>("task-form"),
   taskInput: must<HTMLInputElement>("task-input"),
+  taskModule: must<HTMLButtonElement>("task-module"),
+  taskModuleLabel: must<HTMLElement>("task-module-label"),
+  taskPriority: must<HTMLButtonElement>("task-priority"),
+  taskPriorityLabel: must<HTMLElement>("task-priority-label"),
   statusCount: must<HTMLElement>("status-count"),
   languageBtn: must<HTMLButtonElement>("language-btn"),
   languageLabel: must<HTMLElement>("language-label"),
@@ -1040,6 +1051,7 @@ async function selectProject(project: Project): Promise<void> {
   if (!isTodo) state.projectId = project.id;
   // A different container is a different tree: reset the scope to "whole project"; collapse state no longer applies.
   state.scope = { kind: "project" };
+  resetComposer();
   state.collapsedNodes.clear();
   state.collapsedGroups.clear();
   state.collapsedTasks.clear();
@@ -1553,9 +1565,13 @@ function applyScope(scope: Scope): void {
     state.container = { kind: "project", id: state.projectId };
     state.addingSubtaskFor = null;
     subtaskDraft = "";
+    // Reset after the container switch: the new default placement comes from this scope.
+    resetComposer();
     void reload();
     return;
   }
+  // A different scope has a different default placement for the next quick-added task.
+  resetComposer();
   render();
 }
 
@@ -1574,13 +1590,148 @@ function renderToolbar(groups: Group[]): void {
   dom.statusCount.textContent =
     total === 0 ? t("statusbar.noTasks") : tp("statusbar.count", total, { total, done });
 
-  // The placeholder follows the scope: say up front where a new task will land, not only after the user commits.
-  // New tasks in both "All" and "Default" go to the default group, so their placeholders match.
-  const target =
-    state.scope.kind === "project" ? t("scope.default") : scopeLabel(groups, state.scope);
-  dom.taskInput.placeholder = inProject
-    ? t("task.addPlaceholderScoped", { target })
-    : t("task.addPlaceholder");
+  renderComposer();
+}
+
+/** Placement implied by the current scope: "All" and "Default" both mean unclassified. */
+function scopeTarget(): ScopeTarget {
+  if (state.container.kind !== "project") {
+    return { moduleId: null, submoduleId: null };
+  }
+  return resolveTarget(buildGroups(state.tasks, state.modules), state.scope);
+}
+
+/** Human-readable placement for the composer trigger and placeholders. */
+function targetLabel(target: ScopeTarget): string {
+  if (target.submoduleId !== null) {
+    for (const module of state.modules) {
+      const submodule = module.submodules.find((child) => child.id === target.submoduleId);
+      if (submodule) {
+        return t("task.modulePath", { module: module.name, submodule: submodule.name });
+      }
+    }
+  }
+  if (target.moduleId !== null) {
+    const module = state.modules.find((candidate) => candidate.id === target.moduleId);
+    if (module) return module.name;
+  }
+  return t("scope.default");
+}
+
+/** Back to "current scope + mid"; used on navigation, database reset and after adding a task. */
+function resetComposer(): void {
+  composer = { target: scopeTarget(), priority: "mid" };
+}
+
+/** A module / submodule chosen earlier may be gone (deleted or the container switched). */
+function composerTargetValid(): boolean {
+  const { target } = composer;
+  if (target.submoduleId !== null) {
+    return state.modules.some(
+      (module) =>
+        module.id === target.moduleId &&
+        module.submodules.some((child) => child.id === target.submoduleId),
+    );
+  }
+  if (target.moduleId !== null) {
+    return (
+      state.container.kind === "project" &&
+      state.modules.some((module) => module.id === target.moduleId)
+    );
+  }
+  return true;
+}
+
+/**
+ * Keep both triggers and the input placeholder in sync with the composer.
+ * The placeholder repeats the placement so the user knows where Enter will land.
+ */
+function renderComposer(): void {
+  // Do not keep a dangling module id: fall back to the scope default, leaving priority alone.
+  if (!composerTargetValid()) composer.target = scopeTarget();
+
+  const target = targetLabel(composer.target);
+  dom.taskModuleLabel.textContent = target;
+  const moduleHint = t("task.moduleAria", { target });
+  dom.taskModule.title = moduleHint;
+  dom.taskModule.setAttribute("aria-label", moduleHint);
+
+  const priority = priorityLabel(composer.priority);
+  dom.taskPriorityLabel.textContent = priority;
+  const priorityHint = t("task.priorityAria", { priority });
+  dom.taskPriority.title = priorityHint;
+  dom.taskPriority.setAttribute("aria-label", priorityHint);
+
+  dom.taskInput.placeholder =
+    state.container.kind === "project"
+      ? t("task.addPlaceholderScoped", { target })
+      : t("task.addPlaceholder");
+}
+
+function chooseComposerTarget(target: ScopeTarget): void {
+  composer.target = target;
+  renderComposer();
+  dom.taskInput.focus();
+}
+
+function chooseComposerPriority(priority: Priority): void {
+  composer.priority = priority;
+  renderComposer();
+  dom.taskInput.focus();
+}
+
+/**
+ * Module dropdown for the next quick-added task. Flat rather than nested submenus,
+ * so a long module list stays inside the viewport near the bottom edge.
+ */
+function openComposerModuleMenu(): void {
+  const items: MenuItem[] = [
+    {
+      label: t("scope.default"),
+      checked: composer.target.moduleId === null && composer.target.submoduleId === null,
+      onSelect: () => chooseComposerTarget({ moduleId: null, submoduleId: null }),
+    },
+  ];
+
+  // "My tasks" has no modules: every task there is unclassified, so only "Default" is offered.
+  if (state.container.kind === "project") {
+    for (const module of state.modules) {
+      items.push({
+        label: module.name,
+        checked: composer.target.moduleId === module.id && composer.target.submoduleId === null,
+        onSelect: () => chooseComposerTarget({ moduleId: module.id, submoduleId: null }),
+      });
+      for (const submodule of module.submodules) {
+        items.push({
+          label: t("task.modulePath", { module: module.name, submodule: submodule.name }),
+          checked: composer.target.submoduleId === submodule.id,
+          onSelect: () =>
+            chooseComposerTarget({ moduleId: module.id, submoduleId: submodule.id }),
+        });
+      }
+    }
+  }
+
+  openMenu({
+    items,
+    position: { kind: "anchor", element: dom.taskModule },
+    label: t("scope.module"),
+    restoreFocus: dom.taskModule,
+  });
+}
+
+/** Priority dropdown for the next quick-added task. */
+function openComposerPriorityMenu(): void {
+  openMenu({
+    items: PRIORITY_ORDER.map((priority) => ({
+      label: priorityLabel(priority),
+      checked: composer.priority === priority,
+      onSelect: () => chooseComposerPriority(priority),
+    })),
+    position: { kind: "anchor", element: dom.taskPriority },
+    label: t("priority.label"),
+    restoreFocus: dom.taskPriority,
+  });
 }
 
 function currentFilters(): TaskFilters {
@@ -3109,7 +3260,10 @@ async function deleteNodeFlow(kind: NodeKind, id: number, label: string): Promis
     await api.deleteNode(kind, id);
     state.collapsedNodes.delete(id);
     for (const submodule of submoduleIds) state.collapsedNodes.delete(submodule.id);
-    if (scopeWasInside) state.scope = { kind: "project" };
+    if (scopeWasInside) {
+      state.scope = { kind: "project" };
+      resetComposer();
+    }
 
     await reload();
     showNotice(t("toast.nodeDeleted", { noun, label }));
@@ -3163,6 +3317,7 @@ async function deleteProjectFlow(project: Project): Promise<void> {
       if (wasHere) state.container = { kind: "todo" };
       if (wasCurrentProject) state.projectId = null;
       state.scope = { kind: "project" };
+      resetComposer();
       state.collapsedNodes.clear();
       state.collapsedGroups.clear();
       state.collapsedTasks.clear();
@@ -3197,6 +3352,7 @@ async function resetDatabaseFlow(): Promise<void> {
     state.container = { kind: "todo" };
     state.projectId = null;
     state.scope = { kind: "project" };
+    resetComposer();
     state.collapsedNodes.clear();
     state.collapsedGroups.clear();
     state.collapsedTasks.clear();
@@ -3218,12 +3374,22 @@ async function resetDatabaseFlow(): Promise<void> {
 async function createTask(): Promise<void> {
   const title = dom.taskInput.value.trim();
   if (!title) return;
+  const placedIn = targetLabel(composer.target);
   try {
-    // A new task follows the current scope: a selected module goes into that module, a submodule into that submodule.
-    const target = resolveTarget(buildGroups(state.tasks, state.modules), state.scope);
-    const created = await api.createTask(state.container, target, title);
+    // The composer starts at the current scope and lets the user override module / priority for this task.
+    const created = await api.createTask(
+      state.container,
+      composer.target,
+      title,
+      null,
+      composer.priority,
+    );
     dom.taskInput.value = "";
+    resetComposer();
     await reload();
+    // A task placed outside the current scope (or hidden by filters) leaves no visible row; say so instead of failing silently.
+    const visible = document.querySelector(`tr[data-task-id="${created.task.id}"]`) !== null;
+    if (!visible) showNotice(t("toast.taskAddedElsewhere", { target: placedIn }));
     for (const notice of created.notices) showNotice(notice);
   } catch (error) {
     showNotice(describe(error), "error");
@@ -3363,6 +3529,8 @@ function boot(): void {
   // Tauri's drag logic intercepts the drag region first, so the menu's global mousedown never fires; close it in the capture phase instead.
   dom.titlebarDrag.addEventListener("mousedown", () => closeMenu(), true);
   dom.projectBtn.addEventListener("click", openProjectMenu);
+  dom.taskModule.addEventListener("click", openComposerModuleMenu);
+  dom.taskPriority.addEventListener("click", openComposerPriorityMenu);
   dom.aboutBtn.addEventListener("click", openAboutDialog);
   initTooltips();
   initProjectHeading();

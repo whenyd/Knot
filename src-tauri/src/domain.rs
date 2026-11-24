@@ -545,8 +545,8 @@ pub fn rename_submodule(conn: &Connection, id: i64, name: &str) -> Res<Submodule
 ///
 /// Top-level placement rules: the container determines the project; `module_id` /
 /// `submodule_id` come from the caller based on the "current scope", and leaving them out
-/// means "default". Priority defaults to mid, and the sort order is the maximum within
-/// **the same group** + 1 (last in the group).
+/// means "default". The caller picks the priority (the UI defaults to mid), and the sort
+/// order is the maximum within **the same group** + 1 (last in the group).
 ///
 /// A subtask's true placement lives on its parent: the container must match the parent's,
 /// `module_id` / `submodule_id` are always NULL (ignored even if passed), and sort order is
@@ -560,6 +560,7 @@ pub fn create_task(
     submodule_id: Option<i64>,
     parent_task_id: Option<i64>,
     title: &str,
+    priority: Priority,
 ) -> Res<TaskCreated> {
     let title = require_name(title, "task")?;
 
@@ -603,11 +604,12 @@ pub fn create_task(
         Some(parent_id) => next_sort_order(&tx, "task", "parent_task_id = ?1", params![parent_id])?,
     };
 
-    // Default to mid, but follow a lower-priority parent so a new subtask is never
-    // invalid from birth.
+    // A subtask cannot outrank its parent: clamp the requested priority down to the
+    // parent's level so a new subtask is never invalid from birth. Top-level tasks keep
+    // exactly what the caller asked for.
     let priority = match parent_priority {
-        Some(parent) if parent.rank() < Priority::Mid.rank() => parent,
-        _ => Priority::Mid,
+        Some(parent) if priority.rank() > parent.rank() => parent,
+        _ => priority,
     };
 
     let created_at = now_local();
@@ -1655,6 +1657,26 @@ mod tests {
         apply_set_status(conn, proposal.parent_task_id, proposal.status, false).unwrap();
     }
 
+    /// Most tests do not care about priority; default them to mid the way the composer does.
+    fn create_task_mid(
+        conn: &Connection,
+        container: Container,
+        module_id: Option<i64>,
+        submodule_id: Option<i64>,
+        parent_task_id: Option<i64>,
+        title: &str,
+    ) -> Res<TaskCreated> {
+        create_task(
+            conn,
+            container,
+            module_id,
+            submodule_id,
+            parent_task_id,
+            title,
+            Priority::Mid,
+        )
+    }
+
     /// In-memory database with migrations applied: domain tests need no window and no
     /// real file.
     fn conn() -> Connection {
@@ -1672,7 +1694,7 @@ mod tests {
         let project = create_project(&conn, "knot-tr").unwrap();
         let project_id = project.id.unwrap();
 
-        let task = create_task(
+        let task = create_task_mid(
             &conn,
             Container::Project { id: project_id },
             None,
@@ -1701,7 +1723,7 @@ mod tests {
     fn todo_tasks_stay_out_of_projects() {
         let conn = conn();
         let project = create_project(&conn, "支付网关").unwrap();
-        create_task(
+        create_task_mid(
             &conn,
             Container::Todo,
             None,
@@ -1734,14 +1756,14 @@ mod tests {
         };
 
         assert_eq!(
-            create_task(&conn, container, None, None, None, "a")
+            create_task_mid(&conn, container, None, None, None, "a")
                 .unwrap()
                 .task
                 .sort_order,
             0
         );
         assert_eq!(
-            create_task(&conn, container, None, None, None, "b")
+            create_task_mid(&conn, container, None, None, None, "b")
                 .unwrap()
                 .task
                 .sort_order,
@@ -1749,7 +1771,7 @@ mod tests {
         );
         // Different containers order independently
         assert_eq!(
-            create_task(&conn, Container::Todo, None, None, None, "c")
+            create_task_mid(&conn, Container::Todo, None, None, None, "c")
                 .unwrap()
                 .task
                 .sort_order,
@@ -1763,7 +1785,7 @@ mod tests {
     fn rejects_blank_names() {
         let conn = conn();
         assert!(create_project(&conn, "   ").is_err());
-        assert!(create_task(&conn, Container::Todo, None, None, None, "\t\n").is_err());
+        assert!(create_task_mid(&conn, Container::Todo, None, None, None, "\t\n").is_err());
     }
 
     /// Whitespace around names is trimmed; the clean value lands in the database.
@@ -1816,7 +1838,7 @@ mod tests {
     #[test]
     fn rejects_unknown_project() {
         let conn = conn();
-        assert!(create_task(&conn, Container::Project { id: 999 }, None, None, None, "x").is_err());
+        assert!(create_task_mid(&conn, Container::Project { id: 999 }, None, None, None, "x").is_err());
         assert!(create_module(&conn, 999, "m").is_err());
     }
 
@@ -1867,7 +1889,7 @@ mod tests {
         let module = create_module(&conn, project_id, "认证").unwrap();
         seed_submodule(&conn, module.id, "token 刷新");
 
-        let task = create_task(
+        let task = create_task_mid(
             &conn,
             Container::Project { id: project_id },
             Some(module.id),
@@ -1890,7 +1912,7 @@ mod tests {
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = seed_submodule(&conn, module.id, "token 刷新");
 
-        let task = create_task(
+        let task = create_task_mid(
             &conn,
             Container::Project { id: project_id },
             Some(module.id),
@@ -1915,14 +1937,14 @@ mod tests {
         let module = create_module(&conn, project_id, "认证").unwrap();
 
         assert_eq!(
-            create_task(&conn, container, None, None, None, "默认的")
+            create_task_mid(&conn, container, None, None, None, "默认的")
                 .unwrap()
                 .task
                 .sort_order,
             0
         );
         assert_eq!(
-            create_task(&conn, container, Some(module.id), None, None, "模块里的")
+            create_task_mid(&conn, container, Some(module.id), None, None, "模块里的")
                 .unwrap()
                 .task
                 .sort_order,
@@ -1930,7 +1952,7 @@ mod tests {
             "another group starts counting from zero"
         );
         assert_eq!(
-            create_task(
+            create_task_mid(
                 &conn,
                 container,
                 Some(module.id),
@@ -1955,7 +1977,7 @@ mod tests {
         let module = create_module(&conn, a, "认证").unwrap();
 
         assert!(
-            create_task(
+            create_task_mid(
                 &conn,
                 Container::Project { id: b },
                 Some(module.id),
@@ -1976,7 +1998,7 @@ mod tests {
         let submodule = seed_submodule(&conn, auth.id, "token 刷新");
 
         assert!(
-            create_task(
+            create_task_mid(
                 &conn,
                 Container::Project { id: project_id },
                 Some(billing.id),
@@ -1996,7 +2018,7 @@ mod tests {
         let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
 
-        assert!(create_task(&conn, Container::Todo, Some(module.id), None, None, "x").is_err());
+        assert!(create_task_mid(&conn, Container::Todo, Some(module.id), None, None, "x").is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -2183,7 +2205,7 @@ mod tests {
         let conn = conn();
         let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
-        let task = create_task(
+        let task = create_task_mid(
             &conn,
             Container::Project { id: project_id },
             Some(module.id),
@@ -2211,7 +2233,7 @@ mod tests {
         let submodule = seed_submodule(&conn, module.id, "token 刷新");
 
         assert!(
-            create_task(
+            create_task_mid(
                 &conn,
                 Container::Project { id: project_id },
                 None,
@@ -2249,7 +2271,7 @@ mod tests {
     /// Create one level of subtask through the real command (the parent defaults to
     /// `todo`).
     fn create_child(conn: &Connection, parent: &Task, title: &str) -> TaskCreated {
-        create_task(
+        create_task_mid(
             conn,
             container_of(parent),
             None,
@@ -2262,7 +2284,7 @@ mod tests {
 
     fn seed_task(conn: &Connection) -> Task {
         let container = Container::Todo;
-        create_task(conn, container, None, None, None, "实现 token 轮换")
+        create_task_mid(conn, container, None, None, None, "实现 token 轮换")
             .unwrap()
             .task
     }
@@ -2338,6 +2360,48 @@ mod tests {
         set_priority(&conn, parent.id, Priority::High).unwrap();
         let another = create_child(&conn, &parent, "高父的子任务").task;
         assert_eq!(another.priority.as_str(), "mid", "the default level is still mid");
+    }
+
+    #[test]
+    fn create_task_keeps_requested_priority() {
+        let conn = conn();
+        let task = create_task(
+            &conn,
+            Container::Todo,
+            None,
+            None,
+            None,
+            "高优先级任务",
+            Priority::High,
+        )
+        .unwrap()
+        .task;
+
+        assert_eq!(task.priority.as_str(), "high");
+        assert_eq!(load_task(&conn, task.id).unwrap().priority.as_str(), "high");
+    }
+
+    #[test]
+    fn create_subtask_priority_is_clamped_to_parent() {
+        let conn = conn();
+        let parent = seed_task(&conn);
+        set_priority(&conn, parent.id, Priority::Low).unwrap();
+
+        // A caller may ask for high; the domain still caps a subtask at its parent's level.
+        let child = create_task(
+            &conn,
+            container_of(&parent),
+            None,
+            None,
+            Some(parent.id),
+            "高优先级的子任务",
+            Priority::High,
+        )
+        .unwrap()
+        .task;
+
+        assert_eq!(child.priority.as_str(), "low");
+        assert_eq!(load_task(&conn, child.id).unwrap().priority.as_str(), "low");
     }
 
     #[test]
@@ -2477,11 +2541,11 @@ mod tests {
         let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
-        let parent = create_task(&conn, container, Some(module.id), None, None, "父任务")
+        let parent = create_task_mid(&conn, container, Some(module.id), None, None, "父任务")
             .unwrap()
             .task;
 
-        let created = create_task(
+        let created = create_task_mid(
             &conn,
             container,
             Some(module.id),
@@ -2521,7 +2585,7 @@ mod tests {
         let child = create_child(&conn, &parent, "子任务").task;
 
         assert_error_key(
-            create_task(&conn, Container::Todo, None, None, Some(child.id), "孙任务"),
+            create_task_mid(&conn, Container::Todo, None, None, Some(child.id), "孙任务"),
             MessageKey::SubtaskCannotNest,
         );
         assert_eq!(list_tasks(&conn, Container::Todo).unwrap().len(), 2);
@@ -2531,7 +2595,7 @@ mod tests {
     fn subtask_rejects_unknown_parent() {
         let conn = conn();
         assert_not_found(
-            create_task(&conn, Container::Todo, None, None, Some(999), "子任务"),
+            create_task_mid(&conn, Container::Todo, None, None, Some(999), "子任务"),
             "task",
             999,
         );
@@ -2543,7 +2607,7 @@ mod tests {
         let conn = conn();
         let a = create_project(&conn, "A").unwrap().id.unwrap();
         let b = create_project(&conn, "B").unwrap().id.unwrap();
-        let parent = create_task(
+        let parent = create_task_mid(
             &conn,
             Container::Project { id: a },
             None,
@@ -2555,7 +2619,7 @@ mod tests {
         .task;
 
         assert_error_key(
-            create_task(
+            create_task_mid(
                 &conn,
                 Container::Project { id: b },
                 None,
@@ -2578,10 +2642,10 @@ mod tests {
     #[test]
     fn subtask_sort_order_is_per_parent() {
         let conn = conn();
-        let first = create_task(&conn, Container::Todo, None, None, None, "父一")
+        let first = create_task_mid(&conn, Container::Todo, None, None, None, "父一")
             .unwrap()
             .task;
-        let second = create_task(&conn, Container::Todo, None, None, None, "父二")
+        let second = create_task_mid(&conn, Container::Todo, None, None, None, "父二")
             .unwrap()
             .task;
 
@@ -2891,10 +2955,10 @@ mod tests {
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
 
-        let in_module = create_task(&conn, container, Some(module.id), None, None, "登录限流")
+        let in_module = create_task_mid(&conn, container, Some(module.id), None, None, "登录限流")
             .unwrap()
             .task;
-        let in_submodule = create_task(
+        let in_submodule = create_task_mid(
             &conn,
             container,
             Some(module.id),
@@ -2905,7 +2969,7 @@ mod tests {
         .unwrap()
         .task;
         let child = insert_child(&conn, &in_submodule, "先写失败用例", Status::Todo);
-        let outside = create_task(&conn, container, None, None, None, "整理文档")
+        let outside = create_task_mid(&conn, container, None, None, None, "整理文档")
             .unwrap()
             .task;
 
@@ -2947,10 +3011,10 @@ mod tests {
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
 
-        let in_module = create_task(&conn, container, Some(module.id), None, None, "登录限流")
+        let in_module = create_task_mid(&conn, container, Some(module.id), None, None, "登录限流")
             .unwrap()
             .task;
-        let in_submodule = create_task(
+        let in_submodule = create_task_mid(
             &conn,
             container,
             Some(module.id),
@@ -2986,8 +3050,8 @@ mod tests {
 
         let module = create_module(&conn, doomed, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
-        create_task(&conn, container, Some(module.id), None, None, "登录限流").unwrap();
-        let in_submodule = create_task(
+        create_task_mid(&conn, container, Some(module.id), None, None, "登录限流").unwrap();
+        let in_submodule = create_task_mid(
             &conn,
             container,
             Some(module.id),
@@ -2998,10 +3062,10 @@ mod tests {
         .unwrap()
         .task;
         insert_child(&conn, &in_submodule, "先写失败用例", Status::Todo);
-        create_task(&conn, container, None, None, None, "整理文档").unwrap();
+        create_task_mid(&conn, container, None, None, None, "整理文档").unwrap();
 
-        create_task(&conn, Container::Todo, None, None, None, "我的待办里的").unwrap();
-        create_task(
+        create_task_mid(&conn, Container::Todo, None, None, None, "我的待办里的").unwrap();
+        create_task_mid(
             &conn,
             Container::Project { id: kept },
             None,
@@ -3288,7 +3352,7 @@ mod tests {
         let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
-        let existing = create_task(
+        let existing = create_task_mid(
             &conn,
             container,
             Some(module.id),
@@ -3298,7 +3362,7 @@ mod tests {
         )
         .unwrap()
         .task;
-        let task = create_task(&conn, container, None, None, None, "默认的")
+        let task = create_task_mid(&conn, container, None, None, None, "默认的")
             .unwrap()
             .task;
         assert_eq!(task.sort_order, 0, "the default group starts counting from zero");
@@ -3334,7 +3398,7 @@ mod tests {
         let b = create_project(&conn, "B").unwrap().id.unwrap();
         let module_b = create_module(&conn, b, "认证").unwrap();
 
-        let parent = create_task(
+        let parent = create_task_mid(
             &conn,
             Container::Project { id: a },
             None,
@@ -3374,7 +3438,7 @@ mod tests {
         let conn = conn();
         let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let module = create_module(&conn, project_id, "认证").unwrap();
-        let task = create_task(
+        let task = create_task_mid(
             &conn,
             Container::Project { id: project_id },
             Some(module.id),
@@ -3414,7 +3478,7 @@ mod tests {
         let submodule_a = seed_submodule(&conn, module_a.id, "token 刷新");
         let submodule_b = seed_submodule(&conn, module_b.id, "账单");
 
-        let task = create_task(
+        let task = create_task_mid(
             &conn,
             Container::Project { id: a },
             Some(module_a.id),
@@ -3519,10 +3583,10 @@ mod tests {
         let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
-        let target = create_task(&conn, container, Some(module.id), None, None, "目标父任务")
+        let target = create_task_mid(&conn, container, Some(module.id), None, None, "目标父任务")
             .unwrap()
             .task;
-        let task = create_task(&conn, container, None, None, None, "待降级")
+        let task = create_task_mid(&conn, container, None, None, None, "待降级")
             .unwrap()
             .task;
         assert_eq!(task.sort_order, 0);
@@ -3582,7 +3646,7 @@ mod tests {
         let conn = conn();
         let a = create_project(&conn, "A").unwrap().id.unwrap();
         let b = create_project(&conn, "B").unwrap().id.unwrap();
-        let target_a = create_task(
+        let target_a = create_task_mid(
             &conn,
             Container::Project { id: a },
             None,
@@ -3592,7 +3656,7 @@ mod tests {
         )
         .unwrap()
         .task;
-        let target_b = create_task(
+        let target_b = create_task_mid(
             &conn,
             Container::Project { id: b },
             None,
@@ -3603,7 +3667,7 @@ mod tests {
         .unwrap()
         .task;
         let child = create_child(&conn, &target_a, "A 的子任务").task;
-        let task = create_task(
+        let task = create_task_mid(
             &conn,
             Container::Project { id: a },
             None,
@@ -3634,7 +3698,7 @@ mod tests {
     fn demote_updates_target_status_with_notice() {
         let conn = conn();
         let target = seed_task(&conn);
-        let task = create_task(&conn, Container::Todo, None, None, None, "进行中的任务")
+        let task = create_task_mid(&conn, Container::Todo, None, None, None, "进行中的任务")
             .unwrap()
             .task;
         apply_set_status(&conn, task.id, Status::Doing, false).unwrap();
@@ -3657,7 +3721,7 @@ mod tests {
         let container = Container::Project { id: project_id };
         let module = create_module(&conn, project_id, "认证").unwrap();
         let submodule = create_submodule(&conn, module.id, "token 刷新").unwrap();
-        let parent = create_task(
+        let parent = create_task_mid(
             &conn,
             container,
             Some(module.id),
@@ -3667,7 +3731,7 @@ mod tests {
         )
         .unwrap()
         .task;
-        let sibling = create_task(
+        let sibling = create_task_mid(
             &conn,
             container,
             Some(module.id),
@@ -3799,7 +3863,7 @@ mod tests {
     fn reparent_keeps_task_status_and_times() {
         let conn = conn();
         let target = seed_task(&conn);
-        let task = create_task(&conn, Container::Todo, None, None, None, "进行中的任务")
+        let task = create_task_mid(&conn, Container::Todo, None, None, None, "进行中的任务")
             .unwrap()
             .task;
         let doing = apply_set_status(&conn, task.id, Status::Doing, false).unwrap();

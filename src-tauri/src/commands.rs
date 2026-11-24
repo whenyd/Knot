@@ -80,6 +80,7 @@ pub fn create_task(
     submodule_id: Option<i64>,
     parent_task_id: Option<i64>,
     title: String,
+    priority: Priority,
 ) -> Result<TaskCreated, Message> {
     domain::create_task(
         &db.conn(),
@@ -88,6 +89,7 @@ pub fn create_task(
         submodule_id,
         parent_task_id,
         &title,
+        priority,
     )
 }
 

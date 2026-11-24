@@ -1917,12 +1917,18 @@ button.group-caret.has-icon::before {
 }
 
 .add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
   padding: 6px 14px 8px;
   border-top: 0;
   background: transparent;
 }
 
 .add input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
   padding: 6px 4px;
   border: 0;
   border-radius: 0;
@@ -1938,6 +1944,50 @@ button.group-caret.has-icon::before {
 
 .add input::placeholder {
   color: var(--text-3);
+}
+
+/* Quick-add options: two dropdowns, module placement and priority, for the next task only. */
+.add-option {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.add-option:hover,
+.add-option[aria-expanded="true"] {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.add-module {
+  max-width: 32%;
+}
+
+.add-priority {
+  flex: none;
+}
+
+.add-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.add-option .icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
 }
 
 /* ---------------------------------------------------------------- Status bar */
