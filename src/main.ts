@@ -63,7 +63,7 @@ import appIcon from "../src-tauri/icons/icon.png";
 const STARTUP_ERROR_PARAM = "startupError";
 
 /** Kept in sync with the version in src-tauri/tauri.conf.json. */
-const APP_VERSION = "0.1.1";
+const APP_VERSION = "0.2.0";
 
 // Three-state status: clicking the status cell cycles to the next state; the right-click "Set status…" menu picks directly, and cycling is just a shortcut.
 const NEXT_STATUS: Record<Status, Status> = { todo: "doing", doing: "done", done: "todo" };
