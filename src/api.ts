@@ -82,11 +82,21 @@ export interface StatusPlan {
   reason: BackendMessage | null;
 }
 
+/** A parent completion proposed by aggregation; nothing is written until the user confirms. */
+export interface ParentStatusProposal {
+  parentTaskId: number;
+  parentTitle: string;
+  status: Status;
+  message: BackendMessage;
+}
+
 /** Return of `apply_set_status`. */
 export interface StatusOutcome {
   changed: Task[];
   /** Toast when a parent task was changed automatically. */
   notices: BackendMessage[];
+  /** Parent completions that still need confirmation. */
+  parentProposals: ParentStatusProposal[];
 }
 
 /** Pre-delete notice: how many tasks this will delete (including subtasks). */
@@ -103,12 +113,16 @@ export interface TaskCreated {
 /** Return of `delete_task`: toasts when a parent was changed automatically after deleting a subtask. */
 export interface DeleteOutcome {
   notices: BackendMessage[];
+  /** Parent completions that still need confirmation. */
+  parentProposals: ParentStatusProposal[];
 }
 
 /** Return of `reparent_task`: the task after re-parenting plus toasts when a parent was changed automatically. */
 export interface ReparentOutcome {
   task: Task;
   notices: BackendMessage[];
+  /** Parent completions that still need confirmation. */
+  parentProposals: ParentStatusProposal[];
 }
 
 export const api = {

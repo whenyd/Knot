@@ -35,6 +35,7 @@
   --warning-soft: #fff4e0;
   --neutral-soft: #f1f3f5;
   --success: #369650;
+  --success-soft: #e8f5ec;
   --status-doing: #f59e0b;
 
   /* Brief row highlight after a priority change / move: warm yellow in light, dim amber in dark, easy on the eyes and keeping text contrast */
@@ -85,6 +86,7 @@
   --warning-soft: #3a2f1f;
   --neutral-soft: #33363a;
   --success: #57965c;
+  --success-soft: #26352a;
   --flash-bg: #4a3a1e;
   --resize-neighbor-bg: #25324d;
   --resize-line: #3d6bb3;
@@ -1097,8 +1099,12 @@ button.group-caret.is-collapsed::before {
 
 .menu-item:hover,
 .menu-item:focus-visible {
-  background: #f3f4f6;
   outline: none;
+}
+
+.menu-item:hover,
+.is-keyboard-nav .menu-item:focus-visible {
+  background: #f3f4f6;
 }
 
 .menu-label {
@@ -1466,8 +1472,8 @@ html[data-platform="linux"] .window-controls {
 }
 
 .topbar .filter-chip[data-priority="low"][aria-pressed="true"] {
-  background: var(--neutral-soft);
-  color: var(--text-2);
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 /* ---------------------------------------------------------------- Sidebar */
@@ -1588,6 +1594,13 @@ html[data-platform="linux"] .window-controls {
 
 .scope-row.selected {
   background: var(--bg-selected);
+}
+
+/* Keep the right-clicked sidebar row highlighted while its menu is open. */
+.side-item.is-menu-open:not(.selected),
+.scope-row.is-menu-open:not(.selected),
+.side-heading.is-menu-open {
+  background: var(--bg-hover-list);
 }
 
 .scope-name {
@@ -1779,6 +1792,11 @@ button.group-caret.has-icon::before {
   background: var(--bg-subtle);
 }
 
+/* Keep the originating task row highlighted while its context menu is open. */
+.row-task.is-menu-open > td {
+  background: var(--bg-hover-list);
+}
+
 .task-title {
   font-size: 14.5px;
 }
@@ -1870,8 +1888,8 @@ button.group-caret.has-icon::before {
 }
 
 .priority-low {
-  background: var(--neutral-soft);
-  color: var(--text-2);
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .subtask-add {
@@ -2003,7 +2021,7 @@ button.group-caret.has-icon::before {
 }
 
 .menu-item:hover,
-.menu-item:focus-visible,
+.is-keyboard-nav .menu-item:focus-visible,
 .menu-item[aria-expanded="true"] {
   background: var(--bg-selected);
 }
@@ -2039,6 +2057,10 @@ button.group-caret.has-icon::before {
 .modal-title {
   font-size: 14px;
   font-weight: 600;
+}
+
+.modal-card.is-alert .modal-title {
+  color: var(--warning);
 }
 
 .modal-body {

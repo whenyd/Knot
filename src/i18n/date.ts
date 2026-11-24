@@ -4,39 +4,19 @@
  * Stored values stay `YYYY-MM-DDTHH:MM` local text; sorting compares that
  * raw string, so nothing here may change the persisted format.
  */
-import { getLanguage, LOCALES, t, type Language } from "./index";
+import { LOCALES, t } from "./index";
 
 const SCHEDULE_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
 
-const OPTIONS: Record<Language, Intl.DateTimeFormatOptions> = {
-  zh: {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  },
-  en: {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  },
-};
-
-const formatters = new Map<Language, Intl.DateTimeFormat>();
-
-function formatter(): Intl.DateTimeFormat {
-  const language = getLanguage();
-  let value = formatters.get(language);
-  if (!value) {
-    value = new Intl.DateTimeFormat(LOCALES[language], OPTIONS[language]);
-    formatters.set(language, value);
-  }
-  return value;
-}
+// Both UI languages use the same numeric format: 2026/11/04 09:00.
+const SCHEDULE_FORMATTER = new Intl.DateTimeFormat(LOCALES.zh, {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
 
 /** Format a stored local timestamp for display; unparseable input stays readable. */
 export function formatSchedule(value: string | null): string {
@@ -58,5 +38,5 @@ export function formatSchedule(value: string | null): string {
     return value.replace("T", " ");
   }
 
-  return formatter().format(date);
+  return SCHEDULE_FORMATTER.format(date);
 }

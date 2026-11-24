@@ -173,7 +173,7 @@ Phase 6 implementation decisions:
 - `PRAGMA foreign_key_check` moves into the migration transaction, before committing; on failure it rolls back `user_version` as well, and the next startup still refuses.
 - The error window is created independently with `WebviewUrl::App("index.html?startupError=…")` and does not depend on the timing of `window.url()` in the setup phase; the reason takes only the first line of the SQLite error, and the backup path comes first, so both are visible without scrolling.
 - Database reset and rebuild does not restart the process: hold the lock and swap the connection out → delete the main file and sidecar files → reopen and migrate → put it back; `.bak-*` backups are kept, and if the main file cannot be deleted the original database is reconnected.
-- New unit tests cover backup generation / keeping 5 copies / failure with a path / reset and rebuild / FK check rollback; after internationalization all 113 backend tests pass.
+- New unit tests cover backup generation / keeping 5 copies / failure with a path / reset and rebuild / FK check rollback; after internationalization all 117 backend tests pass.
 
 ### Phase 7 · Engineering
 
@@ -349,9 +349,59 @@ Phase 15 implementation decisions:
 - `Message.params` supports strings, numbers and nested messages; nesting lets "reopening the database also failed: {inner error}" still localize in one pass.
 - `plan_set_status.reason` changes from an empty string to `null`; the frontend decides whether to show the dialog only by `needs_confirm`, no longer relying on whether the string is empty.
 - The startup error window title stays `Knot` (localStorage cannot be read when the window is created), while the body and `document.title` use the current language; no extra `setTitle` permission was added for the title.
-- Switching the language clears the column-width cache and re-clamps the old widths with `COLUMN_MIN` under the new language; the default time column is set to 176px based on the measured width of the English `Nov 4, 2026, 9:00 AM`, and the task column minimum is 100px.
+- Switching the language clears the column-width cache and re-clamps the old widths with `COLUMN_MIN` under the new language; times are shown as `2026/11/04 09:00` (24-hour clock) in both Chinese and English, with the time column defaulting to 176px and a 80px minimum (when narrowed, dates are ellipsized and the full value remains in the hover tooltip); the task column minimum is 100px.
 - Migration files only translate comments; SQL and released structures are not changed by a single character; the rule in CLAUDE.md changes to "SQL structure and logic cannot be changed; comments can be translated".
 - When comments are Englished, Chinese data in test fixtures (project/module/task names) is kept, since it verifies Unicode and real input; test descriptions and assertion messages change to English.
+
+### Stage 16 · Module duplicate-name validation — Completed
+
+| # | Task | Files | Acceptance | Depends on |
+| --- | --- | --- | --- | --- |
+| ~~T49~~ | ✅ **Detect duplicate names when creating / renaming modules** (done) | `create_module` / `rename_module` in `domain.rs` + `message.rs` / `backend-keys.json` / `src/i18n/backend.ts` | A trimmed duplicate within the same project is rejected with a localized message; the same name in another project is allowed; renaming a module to its own current name still works | — |
+
+Stage 16 implementation decisions:
+
+- The rule lives only in `domain.rs`: `ensure_module_name_free` compares trimmed names within one project, and `except_id` allows a rename to its own current name.
+- Create and rename share the same rule so a rename cannot bypass it; project and submodule names are not restricted yet.
+- No database unique index: existing databases may already contain duplicates, and adding a constraint would need a migration plus cleanup; validation stays in the domain layer for now.
+- Errors use the structured message `validation.moduleNameDuplicate { name }`; the frontend shows a warning dialog with only a confirm button instead of a toast, while other errors still use toasts.
+
+### Stage 17 · Toast duration adjustment — Completed
+
+| # | Task | Files | Acceptance | Depends on |
+| --- | --- | --- | --- | --- |
+| ~~T50~~ | ✅ **All toasts last 3 seconds** (done) | `showNotice` timer in `main.ts`, 2000 → 3000ms | Both info and error toasts disappear after 3 seconds; FIFO queueing is unchanged | — |
+
+Stage 17 implementation decisions:
+
+- Only the dwell time changes; info and error still share the same rhythm rather than being differentiated by kind.
+- The "2 seconds" entries recorded under Stage 9 remain historical decisions; current behavior follows this stage.
+
+### Stage 18 · Parent completion confirmation — Completed
+
+| # | Task | Files | Acceptance | Depends on |
+| --- | --- | --- | --- | --- |
+| ~~T51~~ | ✅ **Ask before completing a parent when all subtasks are done** (done) | `aggregate_parent_status` / outcome structs in `domain.rs` + `ParentStatusProposal` in `api.ts` + `confirmParentProposal` in `main.ts` | The parent is not written when all subtasks are done; it becomes `done` only after the dialog is confirmed; cancelling keeps the current state; doing / todo still update automatically with a notice | — |
+
+Stage 18 implementation decisions:
+
+- `aggregate_parent_status` returns a `ParentStatusProposal` for `done` without writing; `doing` / `todo` are still written automatically and return a notice.
+- The frontend's `confirmParentProposal()` asks with `askConfirm`; after confirmation it reuses `apply_set_status(parentTaskId, status, false)`. Cancelling writes nothing, and the next subtask event evaluates the parent again.
+- Covered for subtask status changes, subtask deletion and reparenting; a newly created subtask is always `todo` and cannot complete a parent.
+- The dialog body uses the structured message `confirm.parentAutoDone { title }`, translated through the existing tables.
+
+### Stage 19 · Subtask retargeting — Completed
+
+| # | Task | Files | Acceptance | Depends on |
+| --- | --- | --- | --- | --- |
+| ~~T52~~ | ✅ **Move a subtask directly under another parent in the same container** (done) | `reparent_task` and the `parent_proposals` array in `domain.rs`; the subtask context menu and `parentTargetItem` in `main.ts` | A subtask's context menu offers "Move to…"; the current parent is excluded; both the old and new parent are re-aggregated; two completion proposals are asked one after another | — |
+
+Stage 19 implementation decisions:
+
+- `Some(target)` in `reparent_task` no longer requires the task itself to be top-level: a top-level task is still demoted, while an existing subtask is retargeted to another target. The target must still be in the same container, have no parent and not be the task itself; the moved task cannot have subtasks.
+- Retargeting re-aggregates both the old and the new parent, so `parentProposals` changes from a single value to an array; targeting the current parent is a no-op.
+- The frontend reuses the same candidate-parent tree and excludes the current parent and every completed task; targets may be parents that already have subtasks or leaf tasks. The toast says "Moved … under …", and priority is still clamped to the new parent's level.
+- New backend tests: `subtask_can_move_to_another_parent`, `retargeting_a_subtask_can_propose_both_parents`, and the `ParentStatusProposal` wire-shape test.
 
 ---
 

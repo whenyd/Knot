@@ -117,13 +117,16 @@ export const en = {
   "menu.setStatus": "Set status…",
   "menu.moveTo": "Move to…",
   "menu.demoteToSubtask": "Demote to subtask…",
+  "menu.moveToParent": "Move to…",
   "menu.promoteToParent": "Promote to top level",
   "menu.deleteTask": "Delete task",
   "menu.moveLabel": "Move to",
   "menu.demoteLabel": "Demote to subtask",
+  "menu.moveToParentLabel": "Move to",
   "menu.moveWholeModule": "Whole module",
   "menu.noMoveTargets": "No place to move this task to",
   "menu.noParentTargets": "No parent task available",
+  "menu.noOtherParents": "No other parent tasks",
   "menu.demoteHasChildren.one":
     "“{title}” still has {count} subtask. Delete it or promote it first.",
   "menu.demoteHasChildren.other":
@@ -132,6 +135,9 @@ export const en = {
   "toast.demoted": "Demoted “{title}” to a subtask of “{target}”",
   "toast.demotedWithPriority":
     "Demoted “{title}” to a subtask of “{target}” and lowered its priority to {priority}",
+  "toast.movedUnderParent": "Moved “{title}” under “{target}”",
+  "toast.movedUnderParentWithPriority":
+    "Moved “{title}” under “{target}” and lowered its priority to {priority}",
   "toast.promoted": "Promoted “{title}” to a top-level task",
   "toast.moved": "Moved “{title}”",
   "toast.priorityCascaded.one": "Lowered the priority of {count} subtask to match",
@@ -142,6 +148,7 @@ export const en = {
   "toast.databaseReset": "Database reset",
 
   "confirm.markAs": "Mark as {status}?",
+  "confirm.parentStatusTitle": "Change parent task status?",
   "confirm.deleteTask": "Delete task?",
   "confirm.deleteTaskWithChildren.one":
     "This task and its {count} subtask will be deleted. This cannot be undone.",
@@ -172,6 +179,7 @@ export const en = {
   "dialog.moduleName": "Module name",
   "dialog.newSubmodule": "New submodule",
   "dialog.submoduleName": "Submodule name",
+  "dialog.duplicateModuleName": "Duplicate module name",
 
   "empty.todo": "No tasks in My Tasks yet. Type below and press Enter.",
   "empty.filtered": "No tasks match the current filters. Try changing the status or priority filters above.",

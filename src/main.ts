@@ -13,12 +13,13 @@ import {
   type Module,
   type MoveTarget,
   type NodeKind,
+  type ParentStatusProposal,
   type Priority,
   type Project,
   type Status,
   type Task,
 } from "./api";
-import { describe } from "./errors";
+import { backendMessageKey, describe } from "./errors";
 import { formatSchedule } from "./i18n/date";
 import {
   initI18n,
@@ -31,7 +32,13 @@ import {
 } from "./i18n";
 import { translateBackendMessage } from "./i18n/backend";
 import { applyStaticTranslations } from "./i18n/static";
-import { closeMenu, openMenu, type MenuItem, type MenuPosition } from "./menu";
+import {
+  closeMenu,
+  openMenu,
+  type MenuItem,
+  type MenuOptions,
+  type MenuPosition,
+} from "./menu";
 import {
   buildGroups,
   countGroup,
@@ -525,6 +532,16 @@ function openProjectMenu(): void {
   });
 }
 
+/** Keep the right-clicked sidebar row highlighted while its context menu is open. */
+function openSidebarMenu(target: HTMLElement, options: MenuOptions): void {
+  openMenu({
+    ...options,
+    onClose: () => target.classList.remove("is-menu-open"),
+  });
+  // Add after openMenu: closing a previous menu would otherwise remove the class.
+  target.classList.add("is-menu-open");
+}
+
 // ---------------------------------------------------------------------------
 // Column widths
 // ---------------------------------------------------------------------------
@@ -544,9 +561,9 @@ const FIXED_COLUMNS: readonly FixedColumn[] = [
 const COLUMN_MIN: Record<ResizableColumn, number> = {
   status: 56,
   title: 100,
-  created: 176,
-  start: 176,
-  end: 176,
+  created: 80,
+  start: 80,
+  end: 80,
   priority: 84,
   note: 80,
 };
@@ -1096,7 +1113,7 @@ function renderSideItem(project: Project): HTMLButtonElement {
     if (project.isTodo || project.id === null) return;
     const projectId = project.id;
     event.preventDefault();
-    openMenu({
+    openSidebarMenu(button, {
       items: [
         { label: t("nav.newModule"), onSelect: () => void createModuleIn(projectId) },
         {
@@ -1127,7 +1144,7 @@ function initProjectHeading(): void {
     if (!project || project.isTodo || project.id === null) return;
     event.preventDefault();
     const projectId = project.id;
-    openMenu({
+    openSidebarMenu(dom.projectHeading, {
       items: [
         { label: t("nav.newModule"), onSelect: () => void createModuleIn(projectId) },
         {
@@ -1337,7 +1354,10 @@ function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
     const items = scopeMenuItems(options);
     if (items.length === 0) return;
     event.preventDefault();
-    openMenu({ items, position: { kind: "point", x: event.clientX, y: event.clientY } });
+    openSidebarMenu(row, {
+      items,
+      position: { kind: "point", x: event.clientX, y: event.clientY },
+    });
   });
 
   return row;
@@ -1878,83 +1898,131 @@ function openTaskMenu(task: Task, event: MouseEvent): void {
 
   if (task.parentTaskId === null) {
     items.push({ label: t("menu.moveTo"), onSelect: () => void openMoveMenu(task, position) });
-    items.push({ label: t("menu.demoteToSubtask"), onSelect: () => openDemoteMenu(task, position) });
+    items.push({
+      label: t("menu.demoteToSubtask"),
+      onSelect: () => openParentTargetMenu(task, position, "demote"),
+    });
   } else {
+    items.push({
+      label: t("menu.moveToParent"),
+      onSelect: () => openParentTargetMenu(task, position, "retarget"),
+    });
     items.push({ label: t("menu.promoteToParent"), onSelect: () => void promoteTask(task) });
   }
   // Separate delete from the structural actions above so it is not clicked by mistake in a dense menu.
   items.push({ type: "separator", label: "" });
   items.push({ label: t("menu.deleteTask"), onSelect: () => void deleteTaskFlow(task) });
-  openMenu({ items, position });
+  const row = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  openMenu({
+    items,
+    position,
+    onClose: () => row?.classList.remove("is-menu-open"),
+  });
+  // Add after openMenu: it first closes any previous menu, whose onClose would
+  // otherwise remove the class we just set on the same row.
+  row?.classList.add("is-menu-open");
+}
+
+type ParentMoveMode = "demote" | "retarget";
+
+/** Candidate parents are top-level tasks in this container, excluding the task itself,
+ * its current parent and completed tasks; both parents and leaf tasks are allowed. */
+function isEligibleParent(task: Task, candidate: Task): boolean {
+  return (
+    candidate.parentTaskId === null &&
+    candidate.id !== task.id &&
+    candidate.id !== task.parentTaskId &&
+    candidate.status !== "done"
+  );
 }
 
 /** Target parents are shown grouped like the current container; subtasks cannot become parents. */
-function demoteTargetItem(task: Task, target: Task): MenuItem {
-  return { label: target.title, onSelect: () => void demoteTaskTo(task, target) };
+function parentTargetItem(task: Task, target: Task, mode: ParentMoveMode): MenuItem {
+  return { label: target.title, onSelect: () => void moveTaskUnderParent(task, target, mode) };
 }
 
-function demoteGroupItem(task: Task, group: Group): MenuItem | null {
-  const tasks = sortParentCandidates(group.tasks.filter((candidate) => candidate.id !== task.id));
+function parentGroupItem(task: Task, group: Group, mode: ParentMoveMode): MenuItem | null {
+  const tasks = sortParentCandidates(
+    group.tasks.filter((candidate) => isEligibleParent(task, candidate)),
+  );
   const children = group.children
-    .map((child) => demoteGroupItem(task, child))
+    .map((child) => parentGroupItem(task, child, mode))
     .filter((child): child is MenuItem => child !== null);
 
   if (tasks.length === 0 && children.length === 0) return null;
   return {
     label: group.label ?? t("scope.default"),
-    children: [...tasks.map((target) => demoteTargetItem(task, target)), ...children],
+    children: [...tasks.map((target) => parentTargetItem(task, target, mode)), ...children],
   };
 }
 
-/** Second-level "Demote to subtask…" menu: targets can only be top-level tasks in the current container. */
-function openDemoteMenu(task: Task, position: MenuPosition): void {
-  const children = state.tasks.filter((candidate) => candidate.parentTaskId === task.id);
-  if (children.length > 0) {
-    showNotice(
-      tp("menu.demoteHasChildren", children.length, {
-        title: task.title,
-        count: children.length,
-      }),
-    );
-    return;
+/** Target-parent menu for demoting a top-level task or moving a subtask to another parent. */
+function openParentTargetMenu(
+  task: Task,
+  position: MenuPosition,
+  mode: ParentMoveMode,
+): void {
+  if (mode === "demote") {
+    const children = state.tasks.filter((candidate) => candidate.parentTaskId === task.id);
+    if (children.length > 0) {
+      showNotice(
+        tp("menu.demoteHasChildren", children.length, {
+          title: task.title,
+          count: children.length,
+        }),
+      );
+      return;
+    }
   }
 
-  const targets = state.tasks.filter(
-    (candidate) => candidate.parentTaskId === null && candidate.id !== task.id,
-  );
+  const targets = state.tasks.filter((candidate) => isEligibleParent(task, candidate));
   if (targets.length === 0) {
-    showNotice(t("menu.noParentTargets"));
+    showNotice(t(mode === "retarget" ? "menu.noOtherParents" : "menu.noParentTargets"));
     return;
   }
 
   const items =
     state.container.kind === "todo"
-      ? sortParentCandidates(targets).map((target) => demoteTargetItem(task, target))
+      ? sortParentCandidates(targets).map((target) => parentTargetItem(task, target, mode))
       : buildGroups(state.tasks, state.modules)
-          .map((group) => demoteGroupItem(task, group))
+          .map((group) => parentGroupItem(task, group, mode))
           .filter((item): item is MenuItem => item !== null);
 
-  openMenu({ items, position, label: t("menu.demoteLabel") });
+  openMenu({
+    items,
+    position,
+    label: t(mode === "demote" ? "menu.demoteLabel" : "menu.moveToParentLabel"),
+  });
 }
 
-/** Redraw only on successful demotion; if the target is collapsed, expand it so the new subtask is visible. */
-async function demoteTaskTo(task: Task, target: Task): Promise<void> {
+/** Redraw only on a successful move; expand the target so the new subtask is visible. */
+async function moveTaskUnderParent(
+  task: Task,
+  target: Task,
+  mode: ParentMoveMode,
+): Promise<void> {
   const clamped = PRIORITY_ORDER.indexOf(task.priority) < PRIORITY_ORDER.indexOf(target.priority);
   try {
     const outcome = await api.reparentTask(task.id, target.id);
     state.collapsedTasks.delete(target.id);
     await reload();
     flashTaskTree(target.id);
+    const priority = { priority: priorityLabel(target.priority) };
     showNotice(
       clamped
-        ? t("toast.demotedWithPriority", {
+        ? t(
+            mode === "demote"
+              ? "toast.demotedWithPriority"
+              : "toast.movedUnderParentWithPriority",
+            { title: task.title, target: target.title, ...priority },
+          )
+        : t(mode === "demote" ? "toast.demoted" : "toast.movedUnderParent", {
             title: task.title,
             target: target.title,
-            priority: priorityLabel(target.priority),
-          })
-        : t("toast.demoted", { title: task.title, target: target.title }),
+          }),
     );
     for (const notice of outcome.notices) showNotice(notice);
+    await confirmParentProposals(outcome.parentProposals);
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -1968,6 +2036,7 @@ async function promoteTask(task: Task): Promise<void> {
     flashTaskTree(task.id);
     showNotice(t("toast.promoted", { title: task.title }));
     for (const notice of outcome.notices) showNotice(notice);
+    await confirmParentProposals(outcome.parentProposals);
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -2378,6 +2447,7 @@ async function changeStatus(task: Task, next: Status): Promise<void> {
       showNotice(t("task.completedHidden"));
     }
     for (const notice of outcome.notices) showNotice(notice);
+    await confirmParentProposals(outcome.parentProposals);
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -2540,7 +2610,8 @@ function resetModal(): void {
   dom.modalInput.value = "";
   dom.modalTextarea.hidden = true;
   dom.modalTextarea.value = "";
-  dom.modalCard.classList.remove("is-wide");
+  dom.modalCancel.hidden = false;
+  dom.modalCard.classList.remove("is-wide", "is-alert");
 }
 
 /**
@@ -2601,6 +2672,95 @@ function askConfirm(options: ConfirmOptions): Promise<boolean> {
 
     dismissActiveDialog = onCancel;
   });
+}
+
+interface AlertOptions {
+  title: string;
+  body: string;
+  confirmText: string;
+}
+
+/** A warning dialog with a single confirm button (no cancel path). */
+function showAlert(options: AlertOptions): Promise<void> {
+  return new Promise((resolve) => {
+    let closed = false;
+    beginDialog();
+    resetModal();
+    dom.modalTitle.textContent = options.title;
+    dom.modalBody.textContent = options.body;
+    dom.modalOk.textContent = options.confirmText;
+    dom.modalCancel.hidden = true;
+    dom.modalCard.classList.add("is-alert");
+    dom.modal.hidden = false;
+    dom.modalOk.focus();
+
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      endDialog();
+      dom.modal.hidden = true;
+      dom.modalCancel.hidden = false;
+      dom.modalCard.classList.remove("is-alert");
+      dom.modalOk.removeEventListener("click", close);
+      dom.modal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey);
+      resolve();
+    };
+    const onBackdrop = (event: MouseEvent): void => {
+      if (event.target === dom.modal) close();
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" || event.key === "Enter") close();
+    };
+
+    dom.modalOk.addEventListener("click", close);
+    dom.modal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey);
+
+    dismissActiveDialog = close;
+  });
+}
+
+/** Duplicate module names are blocking: show a warning dialog instead of a toast. */
+async function handleDuplicateModuleName(error: unknown): Promise<boolean> {
+  if (backendMessageKey(error) !== "validation.moduleNameDuplicate") return false;
+  await showAlert({
+    title: t("dialog.duplicateModuleName"),
+    body: describe(error),
+    confirmText: t("common.ok"),
+  });
+  return true;
+}
+
+/**
+ * Aggregation never writes a parent as done on its own: it proposes the change, and the
+ * user decides here. Declining leaves the parent as it is. A retarget may propose two
+ * parents (the one left and the one joined), so ask for each one in turn.
+ */
+async function confirmParentProposals(
+  proposals: ParentStatusProposal[],
+): Promise<void> {
+  if (proposals.length === 0) return;
+
+  const accepted: ParentStatusProposal[] = [];
+  for (const proposal of proposals) {
+    const confirmed = await askConfirm({
+      title: t("confirm.parentStatusTitle"),
+      body: translateBackendMessage(proposal.message),
+      confirmText: t("common.confirm"),
+    });
+    if (confirmed) accepted.push(proposal);
+  }
+  if (accepted.length === 0) return;
+
+  for (const proposal of accepted) {
+    try {
+      await api.applySetStatus(proposal.parentTaskId, proposal.status, false);
+    } catch (error) {
+      showNotice(describe(error), "error");
+    }
+  }
+  await reload();
 }
 
 interface TextOptions {
@@ -2769,6 +2929,7 @@ async function createModuleIn(projectId: number): Promise<void> {
     }
     await reload();
   } catch (error) {
+    if (await handleDuplicateModuleName(error)) return;
     showNotice(describe(error), "error");
   }
 }
@@ -2862,6 +3023,10 @@ function beginInlineEdit(
         await commit(next);
         await reload();
       } catch (error) {
+        if (await handleDuplicateModuleName(error)) {
+          render();
+          return;
+        }
         showNotice(describe(error), "error");
         render(); // retract the input even on failure; never stop half-edited
       }
@@ -2910,6 +3075,7 @@ async function deleteTaskFlow(task: Task): Promise<void> {
     await reload();
     showNotice(t("toast.taskDeleted"));
     for (const notice of outcome.notices) showNotice(notice);
+    await confirmParentProposals(outcome.parentProposals);
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -3110,7 +3276,7 @@ function drainNotices(): void {
       noticeActive = false;
       drainNotices();
     },
-    2000,
+    3000,
   );
 }
 

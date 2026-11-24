@@ -202,6 +202,17 @@ pub struct StatusPlan {
     pub reason: Option<Message>,
 }
 
+/// A parent status change proposed by aggregation. The parent has not been written yet;
+/// the frontend asks the user, then applies it by setting the parent's status.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentStatusProposal {
+    pub parent_task_id: i64,
+    pub parent_title: String,
+    pub status: Status,
+    pub message: Message,
+}
+
 /// Return of `apply_set_status`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -210,6 +221,8 @@ pub struct StatusOutcome {
     /// Toast shown when the parent task is changed automatically. The user's own click
     /// does not produce a notice.
     pub notices: Vec<Message>,
+    /// Parent completions that still need the user's confirmation.
+    pub parent_proposals: Vec<ParentStatusProposal>,
 }
 
 /// Pre-delete notice: how many tasks (including subtasks) this will remove.
@@ -236,6 +249,8 @@ pub struct TaskCreated {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteOutcome {
     pub notices: Vec<Message>,
+    /// Parent completions that still need the user's confirmation.
+    pub parent_proposals: Vec<ParentStatusProposal>,
 }
 
 /// Return of `reparent_task`: the task after the hierarchy change plus toasts for parent
@@ -245,6 +260,8 @@ pub struct DeleteOutcome {
 pub struct ReparentOutcome {
     pub task: Task,
     pub notices: Vec<Message>,
+    /// Parent completions that still need the user's confirmation.
+    pub parent_proposals: Vec<ParentStatusProposal>,
 }
 
 /// Column order of the task table; this is the only copy used by task readers, avoiding
@@ -385,6 +402,7 @@ pub fn create_project(conn: &Connection, name: &str) -> Res<Project> {
 pub fn create_module(conn: &Connection, project_id: i64, name: &str) -> Res<Module> {
     let name = require_name(name, "module")?;
     require_project(conn, project_id)?;
+    ensure_module_name_free(conn, project_id, name, None)?;
     let sort_order = next_sort_order(conn, "module", "project_id = ?1", params![project_id])?;
 
     conn.execute(
@@ -502,6 +520,18 @@ pub fn rename_project(conn: &Connection, id: i64, name: &str) -> Res<Project> {
 }
 
 pub fn rename_module(conn: &Connection, id: i64, name: &str) -> Res<Module> {
+    let name = require_name(name, "module")?;
+    let project_id: i64 = conn
+        .query_row(
+            "SELECT project_id FROM module WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|err| match err {
+            rusqlite::Error::QueryReturnedNoRows => not_found("module", id),
+            other => db_err(other),
+        })?;
+    ensure_module_name_free(conn, project_id, name, Some(id))?;
     rename_row(conn, "module", id, name, "module")?;
     load_module(conn, id)
 }
@@ -620,10 +650,11 @@ pub fn create_task(
     // Creating a subtask is also an aggregation event: a completed parent must go back
     // to doing.
     let mut notices = Vec::new();
-    if let Some(parent_id) = parent_task_id
-        && let Some(change) = aggregate_parent_status(&tx, parent_id)?
-    {
-        notices.push(change.notice);
+    if let Some(parent_id) = parent_task_id {
+        // A newly created subtask is always todo, so it can only reopen a parent,
+        // never complete one.
+        let (parent_notices, _) = split_parent_change(aggregate_parent_status(&tx, parent_id)?);
+        notices.extend(parent_notices);
     }
 
     tx.commit().map_err(db_err)?;
@@ -760,27 +791,36 @@ pub fn move_task(conn: &Connection, id: i64, target: MoveTarget) -> Res<Task> {
     Ok(task)
 }
 
-/// Convert between parent and child: `Some(target)` demotes the task to a subtask of the
-/// target, `None` promotes it to a top-level task.
+/// Move a task under a parent: `Some(target)` makes it a subtask of that target (a
+/// top-level task is demoted; a subtask is retargeted), `None` promotes it to a top-level
+/// task.
 ///
-/// Only one parent-child level is allowed. The demotion target must be a task in the same
-/// container with no parent, and the demoted task cannot bring its own subtasks along—
-/// otherwise grandchild tasks would appear. Promotion inherits the old parent's
-/// classification and appends to the end of that top-level group; both paths recompute the
-/// status of any affected parent.
+/// Only one parent-child level is allowed. The target must be a task in the same container
+/// with no parent, and the moved task cannot bring its own subtasks along—otherwise
+/// grandchild tasks would appear. Promotion inherits the old parent's classification and
+/// appends to the end of that top-level group. Every affected parent is re-aggregated: a
+/// retarget touches both the old and the new parent.
 pub fn reparent_task(
     conn: &Connection,
     id: i64,
     parent_task_id: Option<i64>,
 ) -> Res<ReparentOutcome> {
     let task = load_task(conn, id)?;
+    let previous_parent_id = task.parent_task_id;
+
+    // Moving a subtask to its current parent is a no-op (also avoids aggregating it twice).
+    if parent_task_id.is_some() && parent_task_id == previous_parent_id {
+        return Ok(ReparentOutcome {
+            task,
+            notices: Vec::new(),
+            parent_proposals: Vec::new(),
+        });
+    }
+
     let tx = conn.unchecked_transaction().map_err(db_err)?;
 
-    let (task, notices) = match parent_task_id {
+    let (task, notices, parent_proposals) = match parent_task_id {
         Some(target_id) => {
-            if task.parent_task_id.is_some() {
-                return Err(Message::new(MessageKey::OnlyTopLevelCanDemote));
-            }
             if !load_children(&tx, id)?.is_empty() {
                 return Err(Message::new(MessageKey::HasChildrenCannotDemote));
             }
@@ -820,10 +860,23 @@ pub fn reparent_task(
             .map_err(db_err)?;
 
             let updated = load_task(&tx, id)?;
-            let notices = aggregate_parent_status(&tx, target_id)?
-                .map(|change| vec![change.notice])
-                .unwrap_or_default();
-            (updated, notices)
+            let mut notices = Vec::new();
+            let mut parent_proposals = Vec::new();
+
+            // Retargeting a subtask changes two parents: the one it left and the one it
+            // joined. Both must be re-aggregated.
+            if let Some(old_parent_id) = previous_parent_id {
+                let (old_notices, old_proposals) =
+                    split_parent_change(aggregate_parent_status(&tx, old_parent_id)?);
+                notices.extend(old_notices);
+                parent_proposals.extend(old_proposals);
+            }
+            let (new_notices, new_proposals) =
+                split_parent_change(aggregate_parent_status(&tx, target_id)?);
+            notices.extend(new_notices);
+            parent_proposals.extend(new_proposals);
+
+            (updated, notices, parent_proposals)
         }
         None => {
             let parent_id = task
@@ -852,15 +905,18 @@ pub fn reparent_task(
             .map_err(db_err)?;
 
             let updated = load_task(&tx, id)?;
-            let notices = aggregate_parent_status(&tx, parent_id)?
-                .map(|change| vec![change.notice])
-                .unwrap_or_default();
-            (updated, notices)
+            let (notices, parent_proposals) =
+                split_parent_change(aggregate_parent_status(&tx, parent_id)?);
+            (updated, notices, parent_proposals)
         }
     };
 
     tx.commit().map_err(db_err)?;
-    Ok(ReparentOutcome { task, notices })
+    Ok(ReparentOutcome {
+        task,
+        notices,
+        parent_proposals,
+    })
 }
 
 /// First step of changing status: only compute "is confirmation needed", without writing.
@@ -922,16 +978,25 @@ pub fn apply_set_status(
 
     // Aggregate only when the target itself is a subtask; a manual change to a parent
     // produces no notice.
-    if let Some(parent_id) = parent_id
-        && let Some(change) = aggregate_parent_status(&tx, parent_id)?
-    {
-        changed.push(change.task);
-        notices.push(change.notice);
+    let mut parent_proposals = Vec::new();
+    if let Some(parent_id) = parent_id {
+        match aggregate_parent_status(&tx, parent_id)? {
+            Some(ParentChange::Applied { task, notice }) => {
+                changed.push(task);
+                notices.push(notice);
+            }
+            Some(ParentChange::Proposed(proposal)) => parent_proposals.push(proposal),
+            None => {}
+        }
     }
 
     tx.commit().map_err(db_err)?;
 
-    Ok(StatusOutcome { changed, notices })
+    Ok(StatusOutcome {
+        changed,
+        notices,
+        parent_proposals,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -976,14 +1041,19 @@ pub fn delete_task(conn: &Connection, id: i64) -> Res<DeleteOutcome> {
     }
 
     let mut notices = Vec::new();
-    if let Some(parent_id) = parent_id
-        && let Some(change) = aggregate_parent_status(&tx, parent_id)?
-    {
-        notices.push(change.notice);
+    let mut parent_proposals = Vec::new();
+    if let Some(parent_id) = parent_id {
+        let (parent_notices, proposals) =
+            split_parent_change(aggregate_parent_status(&tx, parent_id)?);
+        notices.extend(parent_notices);
+        parent_proposals.extend(proposals);
     }
 
     tx.commit().map_err(db_err)?;
-    Ok(DeleteOutcome { notices })
+    Ok(DeleteOutcome {
+        notices,
+        parent_proposals,
+    })
 }
 
 /// First step of deleting a module / submodule: only count how many rows will be removed,
@@ -1163,9 +1233,22 @@ fn load_children(conn: &Connection, parent_id: i64) -> Res<Vec<Task>> {
 
 /// Result of a parent task changed by aggregation: the updated task plus one sentence for
 /// the user.
-struct ParentChange {
-    task: Task,
-    notice: Message,
+#[derive(Debug)]
+enum ParentChange {
+    /// The parent status was written; callers add it to the result and show the notice.
+    Applied { task: Task, notice: Message },
+    /// Completing a parent needs the user's confirmation; nothing was written yet.
+    Proposed(ParentStatusProposal),
+}
+
+fn split_parent_change(
+    change: Option<ParentChange>,
+) -> (Vec<Message>, Vec<ParentStatusProposal>) {
+    match change {
+        Some(ParentChange::Applied { notice, .. }) => (vec![notice], Vec::new()),
+        Some(ParentChange::Proposed(proposal)) => (Vec::new(), vec![proposal]),
+        None => (Vec::new(), Vec::new()),
+    }
 }
 
 /// Event-driven parent status derivation; returns `Some` only when the parent status is
@@ -1199,6 +1282,19 @@ fn aggregate_parent_status(conn: &Connection, parent_id: i64) -> Res<Option<Pare
         Status::Todo
     };
 
+    // Completing the parent is the one aggregation result that asks first. Leave the
+    // parent untouched and propose the change; the frontend confirms, then writes it.
+    if next == Status::Done {
+        let message = Message::new(MessageKey::ConfirmParentAutoDone)
+            .param("title", parent.title.clone());
+        return Ok(Some(ParentChange::Proposed(ParentStatusProposal {
+            parent_task_id: parent.id,
+            parent_title: parent.title,
+            status: Status::Done,
+            message,
+        })));
+    }
+
     write_status(conn, &mut parent, next, &now_local())?;
     let notice = Message::new(match next {
         Status::Done => MessageKey::ParentAutoDone,
@@ -1208,7 +1304,7 @@ fn aggregate_parent_status(conn: &Connection, parent_id: i64) -> Res<Option<Pare
         Status::Todo => MessageKey::ParentAutoTodo,
     });
 
-    Ok(Some(ParentChange {
+    Ok(Some(ParentChange::Applied {
         task: parent,
         notice,
     }))
@@ -1277,6 +1373,28 @@ fn require_name<'a>(raw: &'a str, field: &'static str) -> Res<&'a str> {
         return Err(Message::new(MessageKey::NameRequired).param("field", field));
     }
     Ok(trimmed)
+}
+
+/// Module names are unique within a project after trimming. `except_id` lets a rename
+/// keep its current name.
+fn ensure_module_name_free(
+    conn: &Connection,
+    project_id: i64,
+    name: &str,
+    except_id: Option<i64>,
+) -> Res<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM module WHERE project_id = ?1 AND name = ?2 \
+             AND (?3 IS NULL OR id != ?3))",
+            params![project_id, name, except_id],
+            |row| row.get(0),
+        )
+        .map_err(db_err)?;
+    if exists {
+        return Err(Message::new(MessageKey::ModuleNameDuplicate).param("name", name));
+    }
+    Ok(())
 }
 
 fn require_project(conn: &Connection, id: i64) -> Res<()> {
@@ -1532,6 +1650,11 @@ mod tests {
         assert_eq!(error.params.get("id"), Some(&MessageParam::Number(id)));
     }
 
+    /// Simulates the frontend accepting a proposed parent completion.
+    fn confirm_proposal(conn: &Connection, proposal: &ParentStatusProposal) {
+        apply_set_status(conn, proposal.parent_task_id, proposal.status, false).unwrap();
+    }
+
     /// In-memory database with migrations applied: domain tests need no window and no
     /// real file.
     fn conn() -> Connection {
@@ -1649,6 +1772,43 @@ mod tests {
         let conn = conn();
         let project = create_project(&conn, "  认证  ").unwrap();
         assert_eq!(project.name, "认证");
+    }
+
+    /// Module names are unique within one project, after trimming; other projects and
+    /// renaming a module to its own current name are fine.
+    #[test]
+    fn module_names_are_unique_within_a_project() {
+        let conn = conn();
+        let project_id = create_project(&conn, "knot-tr").unwrap().id.unwrap();
+        create_module(&conn, project_id, "认证").unwrap();
+
+        let error = create_module(&conn, project_id, "认证").unwrap_err();
+        assert_eq!(error.key, MessageKey::ModuleNameDuplicate);
+        assert_eq!(
+            error.params.get("name"),
+            Some(&MessageParam::Text("认证".to_owned()))
+        );
+
+        let error = create_module(&conn, project_id, "  认证  ").unwrap_err();
+        assert_eq!(
+            error.params.get("name"),
+            Some(&MessageParam::Text("认证".to_owned())),
+            "the trimmed name is what gets compared"
+        );
+
+        let other_project = create_project(&conn, "别的项目").unwrap().id.unwrap();
+        create_module(&conn, other_project, "认证").unwrap();
+
+        let billing = create_module(&conn, project_id, "计费").unwrap();
+        assert_error_key(
+            rename_module(&conn, billing.id, "认证"),
+            MessageKey::ModuleNameDuplicate,
+        );
+        rename_module(&conn, billing.id, "计费").unwrap();
+        assert_eq!(
+            rename_module(&conn, billing.id, "报表").unwrap().name,
+            "报表"
+        );
     }
 
     /// Creating a task under a nonexistent project must error, not leave a dangling
@@ -2457,9 +2617,10 @@ mod tests {
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
     }
 
-    /// Event 2: the last unfinished subtask completes → parent completes with a toast.
+    /// Event 2: the last unfinished subtask completes → the parent completion is proposed,
+    /// not written; confirming it completes the parent.
     #[test]
-    fn last_child_done_completes_parent_with_notice() {
+    fn last_child_done_proposes_parent_done() {
         let conn = conn();
         let parent = seed_task(&conn);
         let first = create_child(&conn, &parent, "子任务一").task;
@@ -2474,12 +2635,22 @@ mod tests {
         );
 
         let outcome = apply_set_status(&conn, second.id, Status::Done, false).unwrap();
-        assert_eq!(outcome.notices.len(), 1);
-        assert_eq!(outcome.notices[0].key, MessageKey::ParentAutoDone);
+        assert!(outcome.notices.is_empty(), "completion waits for confirmation");
+        assert_eq!(
+            load_task(&conn, parent.id).unwrap().status.as_str(),
+            "doing",
+            "a proposal must not write the parent"
+        );
+        assert!(outcome.changed.iter().all(|task| task.id != parent.id));
+
+        let proposal = outcome
+            .parent_proposals
+            .first()
+            .expect("the last child should propose completing the parent");
+        assert_eq!(proposal.parent_task_id, parent.id);
+        assert_eq!(proposal.message.key, MessageKey::ConfirmParentAutoDone);
+        confirm_proposal(&conn, &proposal);
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
-        let aggregated = outcome.changed.last().expect("the automatically changed parent must also be returned");
-        assert_eq!(aggregated.id, parent.id);
-        assert_eq!(aggregated.status.as_str(), "done");
     }
 
     /// When a non-last subtask completes, the parent does not complete early but moves from
@@ -2530,7 +2701,14 @@ mod tests {
         let first = create_child(&conn, &parent, "子任务一").task;
         let second = create_child(&conn, &parent, "子任务二").task;
         apply_set_status(&conn, first.id, Status::Done, false).unwrap();
-        apply_set_status(&conn, second.id, Status::Done, false).unwrap();
+        let completed = apply_set_status(&conn, second.id, Status::Done, false).unwrap();
+        confirm_proposal(
+            &conn,
+            completed
+                .parent_proposals
+                .first()
+                .expect("the last child should propose completion"),
+        );
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
 
         let outcome = apply_set_status(&conn, first.id, Status::Todo, false).unwrap();
@@ -2571,7 +2749,14 @@ mod tests {
         let first = create_child(&conn, &parent, "子任务一").task;
         let second = create_child(&conn, &parent, "子任务二").task;
         apply_set_status(&conn, first.id, Status::Done, false).unwrap();
-        apply_set_status(&conn, second.id, Status::Done, false).unwrap();
+        let completed = apply_set_status(&conn, second.id, Status::Done, false).unwrap();
+        confirm_proposal(
+            &conn,
+            completed
+                .parent_proposals
+                .first()
+                .expect("the last child should propose completion"),
+        );
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
 
         let outcome = apply_set_status(&conn, parent.id, Status::Todo, false).unwrap();
@@ -2582,10 +2767,10 @@ mod tests {
         assert_eq!(load_task(&conn, second.id).unwrap().status.as_str(), "done");
     }
 
-    /// Aggregation is a literal rule: with no subtasks `all()` is true, so the parent is
-    /// pushed to done.
+    /// Aggregation is a literal rule: with no subtasks `all()` is true, so completing the
+    /// parent is proposed (but not written) and the user can confirm it.
     #[test]
-    fn aggregating_empty_child_set_marks_parent_done() {
+    fn aggregating_empty_child_set_proposes_parent_done() {
         let conn = conn();
         let parent = seed_task(&conn);
 
@@ -2593,8 +2778,22 @@ mod tests {
             .unwrap()
             .expect("an empty subtask set should trigger aggregation");
 
-        assert_eq!(change.task.status.as_str(), "done");
-        assert_eq!(change.notice.key, MessageKey::ParentAutoDone);
+        match change {
+            ParentChange::Proposed(proposal) => {
+                assert_eq!(proposal.parent_task_id, parent.id);
+                assert_eq!(proposal.parent_title, parent.title);
+                assert_eq!(proposal.status.as_str(), "done");
+                assert_eq!(proposal.message.key, MessageKey::ConfirmParentAutoDone);
+            }
+            other => panic!("expected a completion proposal, got {other:?}"),
+        }
+        assert_eq!(
+            load_task(&conn, parent.id).unwrap().status.as_str(),
+            "todo",
+            "a proposal must not write the parent"
+        );
+
+        apply_set_status(&conn, parent.id, Status::Done, false).unwrap();
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
     }
 
@@ -2622,18 +2821,24 @@ mod tests {
         assert!(load_task(&conn, done).is_err());
     }
 
-    /// Event 3: deleting the last unfinished subtask → the parent completes with a toast.
+    /// Event 3: deleting the last unfinished subtask proposes completing the parent;
+    /// confirming it completes the parent.
     #[test]
-    fn deleting_last_unfinished_child_completes_parent_with_notice() {
+    fn deleting_last_unfinished_child_proposes_parent_done() {
         let conn = conn();
         let parent = seed_task(&conn);
         let child = create_child(&conn, &parent, "子任务").task;
 
         let outcome = delete_task(&conn, child.id).unwrap();
 
-        assert_eq!(outcome.notices.len(), 1);
-        assert_eq!(outcome.notices[0].key, MessageKey::ParentAutoDone);
+        assert!(outcome.notices.is_empty());
         assert!(load_task(&conn, child.id).is_err());
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
+        let proposal = outcome
+            .parent_proposals
+            .first()
+            .expect("deleting the last unfinished child should propose completion");
+        confirm_proposal(&conn, proposal);
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
     }
 
@@ -2658,12 +2863,20 @@ mod tests {
         let conn = conn();
         let parent = seed_task(&conn);
         let child = create_child(&conn, &parent, "子任务").task;
-        apply_set_status(&conn, child.id, Status::Done, false).unwrap();
+        let completed = apply_set_status(&conn, child.id, Status::Done, false).unwrap();
+        confirm_proposal(
+            &conn,
+            completed
+                .parent_proposals
+                .first()
+                .expect("the last child should propose completion"),
+        );
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
 
         let outcome = delete_task(&conn, child.id).unwrap();
 
         assert!(outcome.notices.is_empty());
+        assert!(outcome.parent_proposals.is_empty());
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
     }
 
@@ -3020,7 +3233,14 @@ mod tests {
         let parent = seed_task(&conn);
         let child = create_child(&conn, &parent, "子任务").task;
 
-        apply_set_status(&conn, child.id, Status::Done, false).unwrap();
+        let completed = apply_set_status(&conn, child.id, Status::Done, false).unwrap();
+        confirm_proposal(
+            &conn,
+            completed
+                .parent_proposals
+                .first()
+                .expect("the last child should propose completion"),
+        );
 
         let parent_after = load_task(&conn, parent.id).unwrap();
         assert_eq!(parent_after.status.as_str(), "done");
@@ -3037,7 +3257,14 @@ mod tests {
 
         apply_set_status(&conn, parent.id, Status::Doing, false).unwrap();
         assert_local_time(&load_task(&conn, parent.id).unwrap().start_at);
-        apply_set_status(&conn, child.id, Status::Done, false).unwrap();
+        let completed = apply_set_status(&conn, child.id, Status::Done, false).unwrap();
+        confirm_proposal(
+            &conn,
+            completed
+                .parent_proposals
+                .first()
+                .expect("the last child should propose completion"),
+        );
         assert_local_time(&load_task(&conn, parent.id).unwrap().end_at);
 
         let outcome = apply_set_status(&conn, child.id, Status::Todo, false).unwrap();
@@ -3465,18 +3692,106 @@ mod tests {
         );
     }
 
-    /// After the only subtask is promoted away, the old parent auto-completes under the
-    /// zero-subtask rule and returns a notice.
+    /// After the only subtask is promoted away, the old parent completion is proposed under
+    /// the zero-subtask rule; confirming it completes the parent.
     #[test]
-    fn promote_only_child_completes_old_parent_with_notice() {
+    fn promote_only_child_proposes_old_parent_done() {
         let conn = conn();
         let parent = seed_task(&conn);
         let child = create_child(&conn, &parent, "唯一子任务").task;
 
         let outcome = reparent_task(&conn, child.id, None).unwrap();
 
+        assert!(outcome.notices.is_empty());
+        assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "todo");
+        let proposal = outcome
+            .parent_proposals
+            .first()
+            .expect("promoting the only child should propose completion");
+        confirm_proposal(&conn, proposal);
         assert_eq!(load_task(&conn, parent.id).unwrap().status.as_str(), "done");
-        assert_eq!(outcome.notices[0].key, MessageKey::ParentAutoDone);
+    }
+
+    /// A subtask can move directly to another top-level task; the old parent is
+    /// re-aggregated after the child leaves.
+    #[test]
+    fn subtask_can_move_to_another_parent() {
+        let conn = conn();
+        let old_parent = seed_task(&conn);
+        let new_parent = seed_task(&conn);
+        let child = create_child(&conn, &old_parent, "child").task;
+
+        let outcome = reparent_task(&conn, child.id, Some(new_parent.id)).unwrap();
+
+        assert_eq!(outcome.task.parent_task_id, Some(new_parent.id));
+        assert_eq!(
+            load_task(&conn, child.id).unwrap().parent_task_id,
+            Some(new_parent.id)
+        );
+        assert_eq!(outcome.parent_proposals.len(), 1);
+        assert_eq!(outcome.parent_proposals[0].parent_task_id, old_parent.id);
+        assert_eq!(
+            load_task(&conn, old_parent.id).unwrap().status.as_str(),
+            "todo",
+            "the proposal is not written until confirmed"
+        );
+        assert_eq!(
+            load_task(&conn, new_parent.id).unwrap().status.as_str(),
+            "todo"
+        );
+
+        confirm_proposal(&conn, &outcome.parent_proposals[0]);
+        assert_eq!(
+            load_task(&conn, old_parent.id).unwrap().status.as_str(),
+            "done"
+        );
+    }
+
+    /// Moving a done subtask can make both the old and the new parent eligible for
+    /// completion, so both proposals are returned.
+    #[test]
+    fn retargeting_a_subtask_can_propose_both_parents() {
+        let conn = conn();
+        let old_parent = seed_task(&conn);
+        let new_parent = seed_task(&conn);
+        let leaving = create_child(&conn, &old_parent, "leaving").task;
+        let remaining = create_child(&conn, &old_parent, "remaining").task;
+        apply_set_status(&conn, leaving.id, Status::Done, false).unwrap();
+        let old_done = apply_set_status(&conn, remaining.id, Status::Done, false).unwrap();
+        assert_eq!(old_done.parent_proposals[0].parent_task_id, old_parent.id);
+
+        let incoming = create_child(&conn, &new_parent, "incoming").task;
+        let new_done = apply_set_status(&conn, incoming.id, Status::Done, false).unwrap();
+        assert_eq!(new_done.parent_proposals[0].parent_task_id, new_parent.id);
+
+        let outcome = reparent_task(&conn, leaving.id, Some(new_parent.id)).unwrap();
+
+        let proposed: Vec<i64> = outcome
+            .parent_proposals
+            .iter()
+            .map(|proposal| proposal.parent_task_id)
+            .collect();
+        assert_eq!(proposed, vec![old_parent.id, new_parent.id]);
+        assert_eq!(
+            load_task(&conn, old_parent.id).unwrap().status.as_str(),
+            "doing"
+        );
+        assert_eq!(
+            load_task(&conn, new_parent.id).unwrap().status.as_str(),
+            "todo"
+        );
+
+        for proposal in &outcome.parent_proposals {
+            confirm_proposal(&conn, proposal);
+        }
+        assert_eq!(
+            load_task(&conn, old_parent.id).unwrap().status.as_str(),
+            "done"
+        );
+        assert_eq!(
+            load_task(&conn, new_parent.id).unwrap().status.as_str(),
+            "done"
+        );
     }
 
     /// Promotion / demotion changes only the hierarchy, not the task's own status or times.
@@ -3603,9 +3918,29 @@ mod tests {
     fn delete_outcome_wire_shape_is_camel_case() {
         let json = serde_json::to_value(DeleteOutcome {
             notices: vec![Message::new(MessageKey::ParentAutoDoing)],
+            parent_proposals: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["notices"][0]["key"], "notice.parentAutoDoing");
+        assert!(json["parentProposals"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parent_proposal_wire_shape_is_camel_case() {
+        let json = serde_json::to_value(ParentStatusProposal {
+            parent_task_id: 7,
+            parent_title: "Parent".to_string(),
+            status: Status::Done,
+            message: Message::new(MessageKey::ConfirmParentAutoDone)
+                .param("title", "Parent"),
+        })
+        .unwrap();
+
+        assert_eq!(json["parentTaskId"], 7);
+        assert_eq!(json["parentTitle"], "Parent");
+        assert_eq!(json["status"], "done");
+        assert_eq!(json["message"]["key"], "confirm.parentAutoDone");
+        assert!(json.get("parent_task_id").is_none(), "must not be snake_case");
     }
 
     #[test]
@@ -3613,10 +3948,12 @@ mod tests {
         let json = serde_json::to_value(StatusOutcome {
             changed: Vec::new(),
             notices: Vec::new(),
+            parent_proposals: Vec::new(),
         })
         .unwrap();
         assert!(json.get("changed").is_some());
         assert!(json.get("notices").is_some());
+        assert!(json["parentProposals"].as_array().unwrap().is_empty());
     }
 
     #[test]

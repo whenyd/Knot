@@ -17,3 +17,8 @@ export function describe(error: unknown): string {
   if (error instanceof Error) return t("error.unexpected", { detail: error.message });
   return t("error.unknown");
 }
+
+/** The structured backend key behind an error, or null for framework/string errors. */
+export function backendMessageKey(error: unknown): string | null {
+  return isBackendMessage(error) ? error.key : null;
+}

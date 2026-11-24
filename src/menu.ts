@@ -40,6 +40,8 @@ export interface MenuOptions {
   restoreFocus?: HTMLElement;
   /** Extra root-panel class for special looks like the project menu. */
   className?: string;
+  /** Called once when this menu closes for any reason. */
+  onClose?: () => void;
 }
 
 interface PanelEntry {
@@ -77,6 +79,19 @@ interface OpenMenu {
 }
 
 let open: OpenMenu | null = null;
+
+// Programmatic focus after a mouse click can still match `:focus-visible` and
+// leave the first item looking hovered. Track the input modality so only real
+// keyboard navigation paints the focus background.
+function markKeyboard(): void {
+  document.body.classList.add("is-keyboard-nav");
+}
+function markPointer(): void {
+  document.body.classList.remove("is-keyboard-nav");
+}
+window.addEventListener("keydown", markKeyboard, { capture: true });
+window.addEventListener("pointerdown", markPointer, { capture: true });
+window.addEventListener("pointermove", markPointer, { capture: true, passive: true });
 
 const GAP = 2;
 const EDGE = 4;
@@ -162,6 +177,7 @@ export function openMenu(options: MenuOptions): void {
     window.removeEventListener("scroll", onWindowScroll, { capture: true });
     window.removeEventListener("resize", closeMenu);
     window.removeEventListener("blur", closeMenu);
+    options.onClose?.();
   };
 
   // Radio-like menus such as priority focus the current value by default; others land on the first item.

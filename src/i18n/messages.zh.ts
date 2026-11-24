@@ -115,13 +115,16 @@ export const zh = {
   "menu.setStatus": "设置状态…",
   "menu.moveTo": "移动到…",
   "menu.demoteToSubtask": "降为子任务…",
+  "menu.moveToParent": "移动到…",
   "menu.promoteToParent": "升为父任务",
   "menu.deleteTask": "删除任务",
   "menu.moveLabel": "移动到",
   "menu.demoteLabel": "降为子任务",
+  "menu.moveToParentLabel": "移动到",
   "menu.moveWholeModule": "整个模块",
   "menu.noMoveTargets": "没有可移动到的位置",
   "menu.noParentTargets": "没有可挂靠的父任务",
+  "menu.noOtherParents": "没有其他父任务",
   "menu.demoteHasChildren.one":
     "「{title}」还有 {count} 个子任务，不能直接降级；请先删除或升为父任务",
   "menu.demoteHasChildren.other":
@@ -130,6 +133,9 @@ export const zh = {
   "toast.demoted": "已将「{title}」降为「{target}」的子任务",
   "toast.demotedWithPriority":
     "已将「{title}」降为「{target}」的子任务，优先级调整为{priority}",
+  "toast.movedUnderParent": "已将「{title}」移到「{target}」下",
+  "toast.movedUnderParentWithPriority":
+    "已将「{title}」移到「{target}」下，优先级调整为{priority}",
   "toast.promoted": "已将「{title}」升为父任务",
   "toast.moved": "已移动「{title}」",
   "toast.priorityCascaded.one": "已同步下调 {count} 个子任务的优先级",
@@ -140,6 +146,7 @@ export const zh = {
   "toast.databaseReset": "数据库已重置",
 
   "confirm.markAs": "标记为{status}？",
+  "confirm.parentStatusTitle": "更改父任务状态？",
   "confirm.deleteTask": "删除任务？",
   "confirm.deleteTaskWithChildren.one": "这个任务连同 {count} 个子任务会被删除，无法撤销。",
   "confirm.deleteTaskWithChildren.other": "这个任务连同 {count} 个子任务会被删除，无法撤销。",
@@ -168,6 +175,7 @@ export const zh = {
   "dialog.moduleName": "模块名",
   "dialog.newSubmodule": "新建子模块",
   "dialog.submoduleName": "子模块名",
+  "dialog.duplicateModuleName": "模块重名",
 
   "empty.todo": "「我的待办」里还没有任务。在下面输入一行，回车保存。",
   "empty.filtered": "当前筛选下没有任务。调整上方的状态或优先级标签试试。",

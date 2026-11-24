@@ -92,6 +92,12 @@ describe("backend message catalog", () => {
     expect(
       translateBackendMessage({ key: "confirm.cascadeDone", params: { count: 1 } }),
     ).toContain("1 个未完成子任务");
+    expect(
+      translateBackendMessage({
+        key: "validation.moduleNameDuplicate",
+        params: { name: "认证" },
+      }),
+    ).toBe("模块「认证」已存在");
 
     setLanguageForTest("en");
     expect(
@@ -103,6 +109,12 @@ describe("backend message catalog", () => {
     expect(
       translateBackendMessage({ key: "confirm.cascadeDone", params: { count: 2 } }),
     ).toContain("2 unfinished subtasks.");
+    expect(
+      translateBackendMessage({
+        key: "validation.moduleNameDuplicate",
+        params: { name: "认证" },
+      }),
+    ).toBe("A module named “认证” already exists.");
     expect(translateBackendMessage({ key: "unknown.key" })).toContain("unknown.key");
   });
 });
@@ -114,7 +126,7 @@ describe("date formatting", () => {
     expect(formatSchedule("2026-11-04T00:00")).toBe("2026/11/04 00:00");
 
     setLanguageForTest("en");
-    expect(formatSchedule("2026-11-04T09:00")).toBe("Nov 4, 2026, 9:00 AM");
+    expect(formatSchedule("2026-11-04T09:00")).toBe("2026/11/04 09:00");
 
     expect(formatSchedule(null)).toBe("—");
     expect(formatSchedule("not-a-date")).toBe("not-a-date");

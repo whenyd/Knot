@@ -34,11 +34,11 @@ const zhBackend: Table = {
   "validation.unknownStatus": "未知的状态值 {value}",
   "validation.unknownPriority": "未知的优先级值 {value}",
   "validation.moduleOrderSameProject": "只能在同一项目内调整模块顺序",
+  "validation.moduleNameDuplicate": "模块「{name}」已存在",
   "validation.subtaskCannotNest": "子任务不能再挂子任务",
   "validation.subtaskContainerMismatch": "子任务必须与父任务在同一个容器",
   "validation.subtaskPriorityAboveParent": "子任务优先级不能高于父任务",
   "validation.subtaskCannotMove": "子任务跟随父任务，不能单独移动",
-  "validation.onlyTopLevelCanDemote": "只有顶层任务可以降为子任务",
   "validation.hasChildrenCannotDemote": "这个任务还有子任务，不能直接降级",
   "validation.cannotDemoteToSelf": "不能把任务降为自己的子任务",
   "validation.subtaskParentContainerMismatch": "子任务必须和父任务在同一个容器",
@@ -52,6 +52,7 @@ const zhBackend: Table = {
     "这个任务还有 {count} 个未完成子任务，确认后会一并标记为已完成。",
   "confirm.cascadeDone.other":
     "这个任务还有 {count} 个未完成子任务，确认后会一并标记为已完成。",
+  "confirm.parentAutoDone": "「{title}」的子任务已全部完成，是否将父任务也标记为已完成？",
   "notice.parentAutoDone": "父任务已自动标记为已完成",
   "notice.parentRestoredDoing": "父任务已恢复为进行中",
   "notice.parentAutoDoing": "父任务已自动标记为进行中",
@@ -86,13 +87,13 @@ const enBackend: Table = {
   "validation.unknownStatus": "Unknown status value {value}.",
   "validation.unknownPriority": "Unknown priority value {value}.",
   "validation.moduleOrderSameProject": "Modules can only be reordered within the same project.",
+  "validation.moduleNameDuplicate": "A module named “{name}” already exists.",
   "validation.subtaskCannotNest": "A subtask cannot have subtasks.",
   "validation.subtaskContainerMismatch":
     "A subtask must stay in the same container as its parent task.",
   "validation.subtaskPriorityAboveParent":
     "A subtask cannot have a higher priority than its parent task.",
   "validation.subtaskCannotMove": "A subtask follows its parent and cannot be moved on its own.",
-  "validation.onlyTopLevelCanDemote": "Only top-level tasks can be demoted to subtasks.",
   "validation.hasChildrenCannotDemote":
     "This task still has subtasks and cannot be demoted directly.",
   "validation.cannotDemoteToSelf": "A task cannot be demoted under itself.",
@@ -108,6 +109,8 @@ const enBackend: Table = {
     "This task has {count} unfinished subtask. Confirming will mark it as done too.",
   "confirm.cascadeDone.other":
     "This task has {count} unfinished subtasks. Confirming will mark them as done too.",
+  "confirm.parentAutoDone":
+    "All subtasks of “{title}” are done. Mark the parent task as done too?",
   "notice.parentAutoDone": "The parent task was marked as done automatically",
   "notice.parentRestoredDoing": "The parent task was restored to doing",
   "notice.parentAutoDoing": "The parent task was marked as doing automatically",

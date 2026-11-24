@@ -19,9 +19,9 @@ English · Dark:
 ## Current status
 
 The full feature set is in place:
-- Three-level Project / Module / Submodule structure (create, in-place rename, drag reordering, two-step deletion)
-- Tasks with one level of subtasks
-- Parent-child status aggregation
+- Three-level Project / Module / Submodule structure (create, in-place rename, drag reordering, two-step deletion; duplicate module names are rejected per project)
+- Tasks with one level of subtasks (a subtask can be retargeted to another parent in the same container)
+- Parent-child status aggregation (confirm before completing a parent)
 - Status/priority filters and sorting
 - Notes, automatic recording of created/start/end times
 - Cross-project moves and parent-child conversion
