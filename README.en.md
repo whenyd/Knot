@@ -3,8 +3,8 @@
 [中文](README.md) | English
 
 Knot (结) — one knot records one thing. A structured list for development tasks: a single-user, local, offline desktop to-do app.
-For requirements see [docs/specs/goal-and-requirements.en.md](docs/specs/goal-and-requirements.en.md); for layering and the data model see [docs/specs/architecture.en.md](docs/specs/architecture.en.md);
-**for what is left to do see [docs/ROADMAP.en.md](docs/ROADMAP.en.md)**. Chinese: [README.md](README.md).
+
+For the original requirements and feature description see [goal-and-requirements](docs/specs/goal-and-requirements.en.md), and for layering and the data model see [architecture](docs/specs/architecture.en.md).
 
 ## Screenshots
 
@@ -26,9 +26,7 @@ The full feature set is in place:
 - Notes, automatic recording of created/start/end times
 - Cross-project moves and parent-child conversion
 - Pre-migration automatic backups and a startup error page
-
-23 release commands + 1 development-only command (`reset_database`) are implemented; for the full list see
-[docs/ROADMAP.en.md](docs/ROADMAP.en.md#current-status), which this document does not duplicate.
+- Reset database (development-only)
 
 The interface supports a three-state **中文 / English / System** switch (language button in the status bar; the choice is stored locally); backend errors, confirmation reasons and
 aggregation notices also go through the same structured-message translation. See [docs/i18n/glossary.md](docs/i18n/glossary.md) for the terminology glossary.

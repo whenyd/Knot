@@ -1,8 +1,10 @@
 # Knot
 
+[English](README.en.md) | 中文
+
 Knot（结）——一道结记一件事。开发任务的结构化清单：单人、本机、不联网的桌面待办。
-需求见 [docs/specs/goal-and-requirements.md](docs/specs/goal-and-requirements.md)，分层与数据模型见 [docs/specs/architecture.md](docs/specs/architecture.md)，
-**剩下要做什么见 [docs/ROADMAP.md](docs/ROADMAP.md)**。English: [README.en.md](README.en.md)。
+
+原始需求与功能描述见 [goal-and-requirements](docs/specs/goal-and-requirements.md)，分层与数据模型见 [architecture](docs/specs/architecture.md)。
 
 ## 截图
 
@@ -24,9 +26,7 @@ Knot（结）——一道结记一件事。开发任务的结构化清单：单�
 - 备注、创建/开始/结束时间自动记录
 - 跨项目移动与父子互转
 - 迁移前自动备份与启动错误页
-
-已实现 23 条发布命令 + 1 条仅开发版命令（`reset_database`），完整清单见
-[docs/ROADMAP.md](docs/ROADMAP.md#现状)，不在本文重复维护。
+- 重置数据库（仅开发版）
 
 界面支持**中文 / English / 跟随系统**三态切换（状态栏语言按钮，选择记在本机）；后端错误、确认理由与联动提示
 也走同一套结构化消息翻译。英文术语表见 [docs/i18n/glossary.md](docs/i18n/glossary.md)。
