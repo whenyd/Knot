@@ -76,3 +76,9 @@ ROADMAP 末尾的验证约定是硬要求，不能只报“编译通过”：
 2. 涉及界面的改动：用 `@tauri-apps/api/mocks` 的 `mockIPC` 把 `main.ts` 挂到 `index.html`，起 `npx vite --port 1420`，无头 Edge 截图人工核对；验证调用链时让 mock 后端有状态并模拟点击。
 3. 真实窗口 `npm run tauri dev` 过一遍交互（截图证明渲染，证明不了数据对不对）。
 4. 收尾按端口找 PID 再 `taskkill //F //PID`：`background_command stop` 杀不掉 `npx` 拉起的子进程，会占着 1420。
+
+## 语言约定
+
+- 新增Git提交信息使用英文，提交遵循 Conventional Commits：<type>(<scope>): <subject>
+- 代码注释用英文
+- 功能提示词用中英双语

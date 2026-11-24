@@ -80,3 +80,9 @@ The verification conventions at the end of the ROADMAP are a hard requirement; d
 2. Changes involving the UI: use `mockIPC` from `@tauri-apps/api/mocks` to mount `main.ts` onto `index.html`, start `npx vite --port 1420`, and take screenshots with headless Edge for manual review; when verifying a call chain, make the mock backend stateful and simulate clicks.
 3. Go through the interactions in a real window with `npm run tauri dev` (screenshots prove rendering, but not whether the data is correct).
 4. When wrapping up, find the PID by port and then `taskkill //F //PID`: `background_command stop` cannot kill the child process spawned by `npx`, which will hold port 1420.
+
+## Language conventions
+
+- New Git commit messages are in English and follow Conventional Commits: `<type>(<scope>): <subject>`.
+- Code comments are in English.
+- Feature prompts are bilingual (Chinese and English).
