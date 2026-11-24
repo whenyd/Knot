@@ -1,6 +1,7 @@
 /**
- * 原生 title 提示的边框与圆角由系统绘制，CSS 改不了。
- * 指针进入带 title 的元素时把文字接管到自定义浮层，离开或滚动时再还回去。
+ * The native title tooltip's border and radius are drawn by the system, so CSS
+ * cannot change them. When the pointer enters an element with a title, take the
+ * text over into a custom overlay and put it back on leave or scroll.
  */
 const SHOW_DELAY_MS = 400;
 

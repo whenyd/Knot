@@ -1,11 +1,13 @@
-//! 应用装配：建连接、托管状态、注册命令。
+//! Application assembly: open the connection, manage state, register commands.
 //!
-//! 启动顺序是硬的——先有可用（已迁移）的库，才让主窗口工作；迁移失败就换成
-//! 一个错误窗口，绝不带着半迁移的库继续跑。
+//! Startup order is strict: the main window only starts working once a usable (migrated)
+//! database exists. If migration fails we swap in an error window and never keep running
+//! against a half-migrated database.
 
 mod commands;
 mod db;
 mod domain;
+mod message;
 mod migrations;
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -18,8 +20,8 @@ pub fn run() {
                 Ok(database) => {
                     app.manage(database);
                 }
-                // setup 返回 Err 会被 Tauri 直接 panic；这里自己把错误显示出来。
-                Err(message) => show_startup_error(app.handle(), &message),
+                // Returning Err from setup makes Tauri panic; show the error ourselves instead.
+                Err(failure) => show_startup_error(app.handle(), &failure),
             }
             Ok(())
         })
@@ -55,20 +57,24 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// 数据库起不来时，把主窗口换成一个独立的错误窗口。
+/// When the database cannot start, replace the main window with a dedicated error window.
 ///
-/// 主窗口先藏起来（避免闪一下正常界面），错误窗口建好后再关掉主窗口；
-/// 万一窗口也建不出来，至少把主窗口放回来，并把原因写到 stderr。
-fn show_startup_error(app: &tauri::AppHandle, message: &str) {
+/// Hide the main window first (to avoid a flash of the normal UI), then close it once the
+/// error window is built. If the error window cannot be built either, at least restore the
+/// main window and write the reason to stderr.
+fn show_startup_error(app: &tauri::AppHandle, failure: &db::StartupFailure) {
     let main = app.get_webview_window("main");
     if let Some(window) = &main {
         let _ = window.hide();
     }
 
-    let query = encode_query(message);
+    // The window title is created before the frontend can read its saved
+    // language, so it stays language-neutral; the page body is localized.
+    let payload = serde_json::to_string(failure).unwrap_or_else(|_| "{}".to_string());
+    let query = encode_query(&payload);
     let url = WebviewUrl::App(format!("index.html?startupError={query}").into());
     let built = WebviewWindowBuilder::new(app, "startup-error", url)
-        .title("无法启动 — 我的待办")
+        .title("Knot")
         .inner_size(760.0, 520.0)
         .build();
 
@@ -82,15 +88,16 @@ fn show_startup_error(app: &tauri::AppHandle, message: &str) {
             if let Some(window) = main {
                 let _ = window.show();
             }
-            eprintln!("无法显示启动错误（{error}）：{message}");
+            eprintln!("Could not show the startup error ({error}): {failure:?}");
         }
     }
 }
 
-/// 逐字节 percent-encode，只保留 RFC 3986 的 unreserved 字符。
+/// Percent-encode byte by byte, keeping only RFC 3986 unreserved characters.
 ///
-/// 前端用 `URLSearchParams.get` 解码；空格编码成 `%20` 而不是 `+`，
-/// 中文按 UTF-8 字节展开，`&` / `#` / `%` 也不会破坏 query 结构。
+/// The frontend decodes with `URLSearchParams.get`; spaces become `%20` rather than `+`,
+/// non-ASCII text expands as UTF-8 bytes, and `&` / `#` / `%` cannot break the query
+/// structure.
 fn encode_query(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.as_bytes() {

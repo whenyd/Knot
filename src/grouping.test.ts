@@ -41,7 +41,7 @@ function makeModule(
 }
 
 describe("sortTasks", () => {
-  it("按优先级、再按创建时间升序排序，且不修改原数组", () => {
+  it("sorts by priority, then creation time ascending, without mutating the input array", () => {
     const low = makeTask({ id: 1, priority: "low", createdAt: "2026-01-01T08:00", sortOrder: 1 });
     const highLater = makeTask({
       id: 2,
@@ -63,7 +63,7 @@ describe("sortTasks", () => {
     expect(tasks).toEqual(before);
   });
 
-  it("已完成整组排在最后，组内仍按优先级 → 创建时间", () => {
+  it("puts the whole done group last, still sorted by priority → creation time inside", () => {
     const doneHigh = makeTask({
       id: 1,
       status: "done",
@@ -94,7 +94,7 @@ describe("sortTasks", () => {
     ]);
   });
 
-  it("创建时间缺失时视为最早；时间相同再按添加顺序与 id", () => {
+  it("treats a missing creation time as oldest; on equal times falls back to insertion order and id", () => {
     const legacy = makeTask({ id: 5, priority: "high", createdAt: null, sortOrder: 9 });
     const laterAdd = makeTask({
       id: 6,
@@ -113,8 +113,8 @@ describe("sortTasks", () => {
   });
 });
 
-describe("sortTasks（列排序）", () => {
-  it("按优先级升序 / 降序，且不再把已完成单独后置", () => {
+describe("sortTasks (column sorting)", () => {
+  it("sorts by priority ascending / descending and no longer moves done tasks last", () => {
     const doneHigh = makeTask({
       id: 1,
       status: "done",
@@ -138,7 +138,7 @@ describe("sortTasks（列排序）", () => {
     ).toEqual([2, 3, 1]);
   });
 
-  it("按开始时间升降序，未记录时间的任务始终排在最后", () => {
+  it("sorts by start time both ways; tasks without a time always go last", () => {
     const early = makeTask({ id: 1, startAt: "2026-01-01T08:00" });
     const late = makeTask({ id: 2, startAt: "2026-03-01T08:00" });
     const none = makeTask({ id: 3, startAt: null });
@@ -151,7 +151,7 @@ describe("sortTasks（列排序）", () => {
     ).toEqual([2, 1, 3]);
   });
 
-  it("排序值相同时回退到创建时间与添加顺序", () => {
+  it("falls back to creation time and insertion order on equal sort values", () => {
     const later = makeTask({ id: 1, createdAt: "2026-02-01T08:00", sortOrder: 5 });
     const earlier = makeTask({ id: 2, createdAt: "2026-01-01T08:00", sortOrder: 9 });
     const sameMinute = makeTask({ id: 3, createdAt: "2026-02-01T08:00", sortOrder: 2 });
@@ -165,7 +165,7 @@ describe("sortTasks（列排序）", () => {
 });
 
 describe("sortParentCandidates", () => {
-  it("未完成 / 进行中在前，已完成在后；同状态内按创建时间升序", () => {
+  it("orders unfinished / in-progress before done; within a status, by creation time ascending", () => {
     const doneEarly = makeTask({ id: 1, status: "done", createdAt: "2026-01-01T08:00", sortOrder: 1 });
     const todoLate = makeTask({ id: 2, status: "todo", createdAt: "2026-03-01T08:00", sortOrder: 2 });
     const doingMid = makeTask({ id: 3, status: "doing", createdAt: "2026-02-01T08:00", sortOrder: 3 });
@@ -177,7 +177,7 @@ describe("sortParentCandidates", () => {
     expect(tasks).toEqual(before);
   });
 
-  it("创建时间相同（或未记录）时按添加顺序，再按 id", () => {
+  it("falls back to insertion order and then id on equal (or missing) creation times", () => {
     const later = makeTask({ id: 5, createdAt: "2026-02-01T08:00", sortOrder: 9 });
     const earlier = makeTask({ id: 6, createdAt: "2026-02-01T08:00", sortOrder: 3 });
     const legacy = makeTask({ id: 7, createdAt: null, sortOrder: 1 });
@@ -194,20 +194,20 @@ describe("buildGroups", () => {
     makeModule(20, "后端"),
   ];
 
-  it("默认分组排在模块之前；按子模块、模块、默认归组，子任务不单独成组", () => {
+  it("puts the default group before modules; groups by submodule, module, default; subtasks get no group of their own", () => {
     const groups = buildGroups(
       [
         makeTask({ id: 1, moduleId: 10, submoduleId: 100 }),
         makeTask({ id: 2, moduleId: 10 }),
         makeTask({ id: 3 }),
-        // 子任务即使带着分类字段，也跟着父任务走，不占组。
+        // A subtask follows its parent even when it carries classification fields; it takes no group.
         makeTask({ id: 4, moduleId: 10, submoduleId: 100, parentTaskId: 1 }),
       ],
       modules,
     );
 
     expect(groups.map((group) => [group.kind, group.id, group.label])).toEqual([
-      ["unclassified", null, "默认"],
+      ["unclassified", null, null],
       ["module", 10, "前端"],
       ["module", 20, "后端"],
     ]);
@@ -218,7 +218,7 @@ describe("buildGroups", () => {
     expect(groups[2].children).toEqual([]);
   });
 
-  it("用户建的模块和子模块即使为空也保留，空默认分组不出现", () => {
+  it("keeps user-created modules and submodules even when empty, and hides an empty default group", () => {
     const groups = buildGroups([], [makeModule(10, "空模块", [{ id: 100, name: "空子模块" }])]);
 
     expect(groups).toHaveLength(1);
@@ -226,7 +226,7 @@ describe("buildGroups", () => {
     expect(groups[0].children.map((group) => group.label)).toEqual(["空子模块"]);
   });
 
-  it("组内任务复用 sortTasks 的排序", () => {
+  it("reuses sortTasks ordering inside a group", () => {
     const groups = buildGroups(
       [
         makeTask({ id: 1, moduleId: 10, priority: "low" }),
@@ -241,7 +241,7 @@ describe("buildGroups", () => {
 });
 
 describe("countGroup / countGroups", () => {
-  it("只数父任务，子分组递归累加，done 只数已完成", () => {
+  it("counts parent tasks only, adds child groups recursively, and only counts done as done", () => {
     const groups = buildGroups(
       [
         makeTask({ id: 1, moduleId: 1, status: "done" }),
@@ -267,18 +267,18 @@ describe("selectScope", () => {
     [makeModule(10, "前端", [{ id: 100, name: "样式" }]), makeModule(20, "后端")],
   );
 
-  it("项目返回整棵树", () => {
+  it("returns the whole tree for a project", () => {
     expect(selectScope(groups, { kind: "project" })).toHaveLength(3);
   });
 
-  it("模块范围只返回该模块，默认范围只返回默认组", () => {
+  it("returns only the module for a module scope and only the default group for the default scope", () => {
     expect(selectScope(groups, { kind: "module", id: 20 }).map((group) => group.id)).toEqual([20]);
     expect(
       selectScope(groups, { kind: "unclassified" }).map((group) => group.kind),
     ).toEqual(["unclassified"]);
   });
 
-  it("子模块被提升为根，depth 归零，任务保留", () => {
+  it("promotes a submodule to the root with depth zero and keeps its tasks", () => {
     const scoped = selectScope(groups, { kind: "submodule", id: 100 });
 
     expect(scoped).toHaveLength(1);
@@ -287,7 +287,7 @@ describe("selectScope", () => {
     expect(scoped[0].tasks.map((task) => task.id)).toEqual([1]);
   });
 
-  it("找不到子模块时返回空数组", () => {
+  it("returns an empty array when the submodule is not found", () => {
     expect(selectScope(groups, { kind: "submodule", id: 999 })).toEqual([]);
   });
 });
@@ -295,7 +295,7 @@ describe("selectScope", () => {
 describe("resolveTarget", () => {
   const groups = buildGroups([], [makeModule(10, "前端", [{ id: 100, name: "样式" }])]);
 
-  it("项目与默认分组落到默认位置", () => {
+  it("maps project and default scopes to the default position", () => {
     expect(resolveTarget(groups, { kind: "project" })).toEqual({
       moduleId: null,
       submoduleId: null,
@@ -306,21 +306,21 @@ describe("resolveTarget", () => {
     });
   });
 
-  it("模块范围只带 moduleId", () => {
+  it("a module scope carries only moduleId", () => {
     expect(resolveTarget(groups, { kind: "module", id: 10 })).toEqual({
       moduleId: 10,
       submoduleId: null,
     });
   });
 
-  it("子模块范围必须同时带 moduleId 与 submoduleId", () => {
+  it("a submodule scope must carry both moduleId and submoduleId", () => {
     expect(resolveTarget(groups, { kind: "submodule", id: 100 })).toEqual({
       moduleId: 10,
       submoduleId: 100,
     });
   });
 
-  it("找不到归属的子模块回退到默认", () => {
+  it("falls back to default when the owning submodule is not found", () => {
     expect(resolveTarget(groups, { kind: "submodule", id: 999 })).toEqual({
       moduleId: null,
       submoduleId: null,
@@ -329,7 +329,7 @@ describe("resolveTarget", () => {
 });
 
 describe("taskMatchesFilters / filterTasks", () => {
-  it("状态与优先级是且关系，集合内是或关系", () => {
+  it("combines status and priority with AND and values within a set with OR", () => {
     const todoHigh = makeTask({ id: 1, status: "todo", priority: "high" });
     const todoLow = makeTask({ id: 2, status: "todo", priority: "low" });
     const doneHigh = makeTask({ id: 3, status: "done", priority: "high" });

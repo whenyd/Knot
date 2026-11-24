@@ -1,13 +1,14 @@
 /**
- * 视图层：状态 + 事件 + 渲染。原生 DOM，没有 UI 框架。
+ * View layer: state + events + rendering. Native DOM, no UI framework.
  *
- * 数据只朝一个方向流：
- *   `list_projects` / `list_modules` / `list_tasks`  →  纯函数排序分组（grouping.ts）  →  DOM
- * 没有任何反向绑定：界面永远是"重取一遍再全量重画"。数据量小，重画的代价
- * 远低于维护增量 patch 的代价。
+ * Data flows one way only:
+ *   `list_projects` / `list_modules` / `list_tasks`  →  pure sorting/grouping functions (grouping.ts)  →  DOM
+ * There is no reverse binding: the UI always "re-fetches everything, then redraws in full". The data
+ * volume is small, and a full redraw costs far less than maintaining incremental patches.
  */
 import {
   api,
+  type BackendMessage,
   type Container,
   type Module,
   type MoveTarget,
@@ -17,6 +18,19 @@ import {
   type Status,
   type Task,
 } from "./api";
+import { describe } from "./errors";
+import { formatSchedule } from "./i18n/date";
+import {
+  initI18n,
+  readLanguageMode,
+  setLanguageMode,
+  t,
+  tp,
+  type LanguageMode,
+  type MessageKey,
+} from "./i18n";
+import { translateBackendMessage } from "./i18n/backend";
+import { applyStaticTranslations } from "./i18n/static";
 import { closeMenu, openMenu, type MenuItem, type MenuPosition } from "./menu";
 import {
   buildGroups,
@@ -24,7 +38,6 @@ import {
   countGroups,
   filterTasks,
   resolveTarget,
-  scopeLabel,
   selectScope,
   sortParentCandidates,
   sortTasks,
@@ -38,57 +51,68 @@ import {
 import { initTooltips } from "./tooltip";
 import appIcon from "../src-tauri/icons/icon.png";
 
-/** 数据库起不来时，后端通过这个 query 参数把原因交给前端。 */
+/** When the database fails to open, the backend hands the reason to the frontend through this query param. */
 const STARTUP_ERROR_PARAM = "startupError";
 
-/** 与 src-tauri/tauri.conf.json 的 version 保持一致。 */
+/** Kept in sync with the version in src-tauri/tauri.conf.json. */
 const APP_VERSION = "0.1.1";
 
-// 状态三态：状态格点一下循环到下一个；右键「设置状态…」可以直接挑，循环只是快捷方式。
+// Three-state status: clicking the status cell cycles to the next state; the right-click "Set status…" menu picks directly, and cycling is just a shortcut.
 const NEXT_STATUS: Record<Status, Status> = { todo: "doing", doing: "done", done: "todo" };
-const STATUS_LABELS: Record<Status, string> = { todo: "未开始", doing: "进行中", done: "已完成" };
+const STATUS_KEYS: Record<Status, MessageKey> = {
+  todo: "status.todo",
+  doing: "status.doing",
+  done: "status.done",
+};
 const STATUS_ORDER: Status[] = ["todo", "doing", "done"];
 
-// 优先级是浮窗选择：三档都摆出来，不用循环着找。
-const PRIORITY_ORDER: Priority[] = ["high", "mid", "low"];
-const PRIORITY_LABELS: Record<Priority, string> = { high: "高", mid: "中", low: "低" };
+const statusLabel = (status: Status): string => t(STATUS_KEYS[status]);
 
-/** 三列时间共用一套文案：创建时间在新建时写入，开始 / 结束随状态变化。 */
-type TimeField = "created" | "start" | "end";
-const TIME_LABELS: Record<TimeField, string> = { created: "创建", start: "开始", end: "结束" };
-const TIME_HINTS: Record<TimeField, string> = {
-  created: "创建任务时自动记录",
-  start: "随状态自动记录",
-  end: "随状态自动记录",
+// Priority is picked from a popover: all three levels are laid out, no cycling to find one.
+const PRIORITY_ORDER: Priority[] = ["high", "mid", "low"];
+const PRIORITY_KEYS: Record<Priority, MessageKey> = {
+  high: "priority.high",
+  mid: "priority.mid",
+  low: "priority.low",
 };
 
-/** `2026-11-04T09:00` → `2026-11-04 09:00`；未设置显示破折号。 */
-function formatSchedule(value: string | null): string {
-  return value === null ? "—" : value.replace("T", " ");
-}
+const priorityLabel = (priority: Priority): string => t(PRIORITY_KEYS[priority]);
+
+/** The three time columns share one set of copy: creation time is written on creation; start / end follow status changes. */
+type TimeField = "created" | "start" | "end";
+const TIME_LABEL_KEYS: Record<TimeField, MessageKey> = {
+  created: "time.createdLabel",
+  start: "time.startLabel",
+  end: "time.endLabel",
+};
+const TIME_HINT_KEYS: Record<TimeField, MessageKey> = {
+  created: "time.createdHint",
+  start: "time.stateHint",
+  end: "time.stateHint",
+};
 
 interface State {
   projects: Project[];
   container: Container;
-  /** 当前项目上下文；切到「我的待办」后仍保留，用于左栏项目名和模块树。 */
+  /** Current project context; kept after switching to "My tasks", so the sidebar project name and module tree stay visible. */
   projectId: number | null;
   scope: Scope;
   modules: Module[];
   tasks: Task[];
-  /** 当前项目上下文的全部任务，供左栏模块树计数；与表格容器解耦。 */
+  /** All tasks in the current project context, for sidebar module-tree counts; decoupled from the table container. */
   projectTasks: Task[];
-  /** 左栏范围树里**收起**的模块 id。默认展开，所以存的是收起的那几个。 */
+  /** Module ids **collapsed** in the sidebar scope tree. Expanded by default, so collapsed ones are stored. */
   collapsedNodes: Set<number>;
-  /** 表格里收起的分类分组，key 由 `groupKey` 生成。与左栏的收起互不影响。 */
+  /** Classification groups collapsed in the table; keys come from `groupKey`. Independent of sidebar collapsing. */
   collapsedGroups: Set<string>;
-  /** 正在内联添加子任务的父任务 id；同一时刻只有一个。 */
+  /** Parent task id whose inline subtask input is open; only one at a time. */
   addingSubtaskFor: number | null;
-  /** 表格里收起了子任务的父任务 id。默认展开，所以存的是收起的那几个。 */
+  /** Parent task ids whose subtasks are collapsed in the table. Expanded by default, so collapsed ones are stored. */
   collapsedTasks: Set<number>;
-  /** 顶部筛选在本次会话内保留，切换范围或项目时不重置。 */
+  /** Top-bar filters persist for this session and reset neither on scope nor on project switch. */
   statusFilter: Set<Status>;
   priorityFilter: Set<Priority>;
-  /** 表头列排序；null = 默认（状态 → 优先级 → 创建时间）。 */
+  /** Header column sort; null = default (status → priority → creation time). */
   sort: TaskSort | null;
 }
 
@@ -109,30 +133,30 @@ const state: State = {
   sort: null,
 };
 
-/** 内联子任务输入框的草稿：放在状态对象外，无关重绘也不丢正在打的字。 */
+/** Draft of the inline subtask input: kept outside the state object, so unrelated redraws do not lose typing. */
 let subtaskDraft = "";
 
-/** 双击范围节点改名：第一次点击会重绘左栏，元素被换掉，原生 dblclick 靠不住；
-    改按“同一节点 400ms 内再次点击”识别，状态放在模块级，重绘不会丢。 */
+/** Double-click a scope node to rename: the first click redraws the sidebar and replaces the element, so native dblclick is unreliable;
+    instead detect "same node clicked again within 400ms"; state is module-level so redraws do not lose it. */
 let scopeRenameTap: { key: string; at: number } | null = null;
 
-/** 左栏模块拖动排序：指针按下只记起点，移动超过阈值才进入拖动态，
-    免得和“单击切换范围”抢事件。一次只拖一个模块。 */
+/** Sidebar module drag-sort: pointerdown only records the start point; dragging begins past a threshold
+    so it does not steal events from "click to switch scope". Only one module drags at a time. */
 interface ModuleDrag {
   id: number;
   row: HTMLElement;
   startX: number;
   startY: number;
   active: boolean;
-  /** 插入位置：在模块行序列里的下标；null = 放在当前位置（不会改变顺序）。 */
+  /** Insertion position: index in the module-row sequence; null = stay in place (no reorder). */
   insertion: number | null;
 }
 let moduleDrag: ModuleDrag | null = null;
 const MODULE_DRAG_THRESHOLD = 4;
 
-/** 输入会话号：旧的失焦回调只认自己那一轮，免得点「＋」时误提交上一轮。 */
+/** Input session number: stale blur callbacks only recognize their own round, so clicking "+" cannot commit the previous round. */
 let subtaskInputSession = 0;
-/** 首次加载时把上次项目接回来；之后的 reload 不能再覆盖用户当前选择。 */
+/** Restore the last project only on first load; later reloads must not override the user's current choice. */
 let startupProjectRestored = false;
 
 // ---------------------------------------------------------------------------
@@ -141,7 +165,7 @@ let startupProjectRestored = false;
 
 function must<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
-  if (!node) throw new Error(`缺少 DOM 节点 #${id}`);
+  if (!node) throw new Error(`Missing DOM node #${id}`);
   return node as T;
 }
 
@@ -158,7 +182,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-/** 引用 index.html 里的 symbol；尺寸交给 CSS。 */
+/** Reuse symbols from index.html; sizing is left to CSS. */
 function icon(name: string, className = "icon"): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("class", className);
@@ -189,6 +213,8 @@ const dom = {
   taskForm: must<HTMLFormElement>("task-form"),
   taskInput: must<HTMLInputElement>("task-input"),
   statusCount: must<HTMLElement>("status-count"),
+  languageBtn: must<HTMLButtonElement>("language-btn"),
+  languageLabel: must<HTMLElement>("language-label"),
   themeBtn: must<HTMLButtonElement>("theme-btn"),
   themeLabel: must<HTMLElement>("theme-label"),
   aboutBtn: must<HTMLButtonElement>("about-btn"),
@@ -214,14 +240,14 @@ const dom = {
   devReset: must<HTMLButtonElement>("dev-reset"),
 };
 
-// 删库重建只在开发版出现；正式构建里整段分支会被裁掉，按钮保持 hidden。
+// Database reset appears in dev builds only; in release builds the whole branch is dropped and the button stays hidden.
 if (import.meta.env.DEV) {
   dom.devReset.hidden = false;
   dom.devReset.addEventListener("click", () => void resetDatabaseFlow());
 }
 
 // ---------------------------------------------------------------------------
-// 主题与当前项目
+// Theme and current project
 // ---------------------------------------------------------------------------
 
 type ThemeMode = "light" | "dark" | "system";
@@ -237,6 +263,15 @@ function readThemeMode(): ThemeMode {
   }
 }
 
+function refreshThemeLabel(): void {
+  const mode = readThemeMode();
+  const iconName = mode === "light" ? "sun" : mode === "dark" ? "moon" : "monitor";
+  dom.themeBtn.querySelector("use")?.setAttribute("href", `#i-${iconName}`);
+  dom.themeLabel.textContent = t(
+    mode === "light" ? "theme.light" : mode === "dark" ? "theme.dark" : "theme.system",
+  );
+}
+
 function applyTheme(mode: ThemeMode): void {
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   const resolved = mode === "system" ? (prefersDark ? "dark" : "light") : mode;
@@ -244,12 +279,9 @@ function applyTheme(mode: ThemeMode): void {
   try {
     localStorage.setItem(THEME_STORAGE_KEY, mode);
   } catch {
-    // 存储不可用只影响下次启动的偏好，不阻塞主题切换。
+    // Storage failure only affects the preference next launch; it does not block theme switching.
   }
-
-  const iconName = mode === "light" ? "sun" : mode === "dark" ? "moon" : "monitor";
-  dom.themeBtn.querySelector("use")?.setAttribute("href", `#i-${iconName}`);
-  dom.themeLabel.textContent = mode === "light" ? "浅色" : mode === "dark" ? "深色" : "跟随系统";
+  refreshThemeLabel();
 }
 
 function initTheme(): void {
@@ -258,12 +290,16 @@ function initTheme(): void {
     const mode = readThemeMode();
     openMenu({
       items: [
-        { label: "浅色", checked: mode === "light", onSelect: () => applyTheme("light") },
-        { label: "深色", checked: mode === "dark", onSelect: () => applyTheme("dark") },
-        { label: "跟随系统", checked: mode === "system", onSelect: () => applyTheme("system") },
+        { label: t("theme.light"), checked: mode === "light", onSelect: () => applyTheme("light") },
+        { label: t("theme.dark"), checked: mode === "dark", onSelect: () => applyTheme("dark") },
+        {
+          label: t("theme.system"),
+          checked: mode === "system",
+          onSelect: () => applyTheme("system"),
+        },
       ],
       position: { kind: "anchor", element: dom.themeBtn },
-      label: "主题",
+      label: t("theme.label"),
     });
   });
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
@@ -271,14 +307,83 @@ function initTheme(): void {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Language
+// ---------------------------------------------------------------------------
+
+let languageMode: LanguageMode = "system";
+
+function refreshLanguageButton(): void {
+  dom.languageLabel.textContent =
+    languageMode === "zh"
+      ? t("language.name.zh")
+      : languageMode === "en"
+        ? t("language.name.en")
+        : t("language.mode.system");
+}
+
+function initLanguage(): void {
+  initI18n();
+  languageMode = readLanguageMode();
+  refreshLanguageButton();
+  dom.languageBtn.addEventListener("click", () => {
+    openMenu({
+      items: [
+        {
+          label: t("language.name.zh"),
+          checked: languageMode === "zh",
+          onSelect: () => applyLanguageMode("zh"),
+        },
+        {
+          label: t("language.name.en"),
+          checked: languageMode === "en",
+          onSelect: () => applyLanguageMode("en"),
+        },
+        {
+          label: t("language.mode.system"),
+          checked: languageMode === "system",
+          onSelect: () => applyLanguageMode("system"),
+        },
+      ],
+      position: { kind: "anchor", element: dom.languageBtn },
+      label: t("language.label"),
+    });
+  });
+}
+
+function applyLanguageMode(mode: LanguageMode): void {
+  languageMode = mode;
+  const changed = setLanguageMode(mode);
+  refreshLanguageButton();
+  if (!changed) return;
+  closeMenu();
+  applyStaticTranslations();
+  refreshThemeLabel();
+  refreshWindowMaxLabel();
+  // Re-clamp cached column widths under the new language's minimums.
+  fixedWidths = null;
+  render();
+}
+
 type AppPlatform = "windows" | "macos" | "linux";
 
-/** macOS 用原生红绿灯；Windows 用顶栏里的自绘按钮；Linux 保留系统标题栏。 */
+/** macOS uses native traffic lights; Windows uses custom buttons in the top bar; Linux keeps the system title bar. */
 function detectPlatform(): AppPlatform {
   const ua = navigator.userAgent;
   if (/Macintosh|Mac OS X/i.test(ua)) return "macos";
   if (/Linux/i.test(ua) && !/Android/i.test(ua)) return "linux";
   return "windows";
+}
+
+let windowMaximized = false;
+let windowControlsReady = false;
+
+/** Keeps the maximize button label correct after a language switch. */
+function refreshWindowMaxLabel(): void {
+  if (!windowControlsReady) return;
+  const label = t(windowMaximized ? "window.restore" : "window.maximize");
+  dom.windowMax.title = label;
+  dom.windowMax.setAttribute("aria-label", label);
 }
 
 async function initWindowControls(): Promise<void> {
@@ -294,11 +399,10 @@ async function initWindowControls(): Promise<void> {
     const maxIcon = dom.windowMax.querySelector("use");
 
     const syncMaximized = async () => {
-      const maximized = await appWindow.isMaximized();
-      maxIcon?.setAttribute("href", maximized ? "#i-restore" : "#i-maximize");
-      const label = maximized ? "还原" : "最大化";
-      dom.windowMax.title = label;
-      dom.windowMax.setAttribute("aria-label", label);
+      windowMaximized = await appWindow.isMaximized();
+      maxIcon?.setAttribute("href", windowMaximized ? "#i-restore" : "#i-maximize");
+      windowControlsReady = true;
+      refreshWindowMaxLabel();
     };
 
     dom.windowMin.addEventListener("click", () => void appWindow.minimize());
@@ -311,8 +415,8 @@ async function initWindowControls(): Promise<void> {
       void syncMaximized();
     });
   } catch (error) {
-    // 浏览器里跑 Vite 时没有 Tauri 运行时，按钮只作为静态预览。
-    console.warn("窗口控制初始化失败", error);
+    // Running Vite in a browser has no Tauri runtime, so the buttons are static previews only.
+    console.warn("Window controls failed to initialize", error);
   }
 }
 
@@ -376,7 +480,7 @@ function readSavedProjectId(): number | null {
   }
 }
 
-/** 记住当前项目上下文；「我的待办」不是项目，不写入。 */
+/** Remember the current project context; "My tasks" is not a project, so it is not written. */
 function persistCurrentProject(): void {
   try {
     if (state.projectId !== null) {
@@ -385,14 +489,14 @@ function persistCurrentProject(): void {
       localStorage.removeItem(PROJECT_STORAGE_KEY);
     }
   } catch {
-    // 存储不可用时退回本次会话的导航行为。
+    // When storage is unavailable, fall back to this session's navigation behavior.
   }
 }
 
 function deleteCurrentProject(): void {
   const project = currentProject();
   if (!project || project.isTodo) {
-    showNotice("「我的待办」不是项目，不能删除");
+    showNotice(t("nav.todoCannotDelete"));
     return;
   }
   void deleteProjectFlow(project);
@@ -400,14 +504,14 @@ function deleteCurrentProject(): void {
 
 function openProjectMenu(): void {
   const items: MenuItem[] = [
-    { label: "新建项目…", onSelect: () => void createProjectFlow() },
-    { label: "删除项目", onSelect: deleteCurrentProject },
+    { label: t("nav.newProject"), onSelect: () => void createProjectFlow() },
+    { label: t("nav.deleteProject"), onSelect: deleteCurrentProject },
     { type: "separator", label: "" },
-    { type: "header", label: "所有项目" },
+    { type: "header", label: t("nav.allProjects") },
     ...state.projects
       .filter((project) => !project.isTodo)
       .map((project) => ({
-        label: project.name,
+        label: projectName(project),
         checked: isCurrent(project),
         onSelect: () => void selectProject(project),
       })),
@@ -416,19 +520,19 @@ function openProjectMenu(): void {
   openMenu({
     items,
     position: { kind: "anchor", element: dom.projectBtn },
-    label: "项目",
+    label: t("nav.projects"),
     className: "is-project",
   });
 }
 
 // ---------------------------------------------------------------------------
-// 列宽
+// Column widths
 // ---------------------------------------------------------------------------
 
 type ResizableColumn = "status" | "title" | "created" | "start" | "end" | "priority" | "note";
 type FixedColumn = Exclude<ResizableColumn, "title">;
 
-/** 「任务」列吃掉剩余宽度，其余列的宽度由用户拖动或默认值决定。 */
+/** The "Task" column takes the remaining width; other columns use user-dragged or default widths. */
 const FIXED_COLUMNS: readonly FixedColumn[] = [
   "status",
   "priority",
@@ -438,24 +542,24 @@ const FIXED_COLUMNS: readonly FixedColumn[] = [
   "note",
 ];
 const COLUMN_MIN: Record<ResizableColumn, number> = {
-  status: 36,
+  status: 56,
   title: 100,
-  created: 80,
-  start: 80,
-  end: 80,
-  priority: 48,
-  note: 60,
+  created: 176,
+  start: 176,
+  end: 176,
+  priority: 84,
+  note: 80,
 };
-const COLUMN_LABELS: Record<ResizableColumn, string> = {
-  status: "状态",
-  title: "任务",
-  created: "创建",
-  start: "开始",
-  end: "结束",
-  priority: "优先级",
-  note: "备注",
+const COLUMN_KEYS: Record<ResizableColumn, MessageKey> = {
+  status: "column.status",
+  title: "column.title",
+  created: "column.created",
+  start: "column.start",
+  end: "column.end",
+  priority: "column.priority",
+  note: "column.note",
 };
-/** 与 index.html 的 col / th 顺序保持一致，拖动时按这个顺序向两侧找空间。 */
+/** Matches the col / th order in index.html; dragging searches for space on both sides in this order. */
 const COLUMN_ORDER: readonly ResizableColumn[] = [
   "status",
   "title",
@@ -497,7 +601,7 @@ function loadFixedWidths(): Partial<Record<FixedColumn, number>> {
     }
     return out;
   } catch {
-    // 存储不可用或内容坏了：回退到默认列宽，不影响本次使用。
+    // Storage unavailable or corrupt: fall back to default column widths without affecting this session.
     return {};
   }
 }
@@ -514,10 +618,10 @@ function currentFixedWidths(): Record<FixedColumn, number> {
 }
 
 /**
- * 固定列按当前宽度落位，「任务」列补满剩余空间；窗口变窄时任务列不低于最小值。
+ * Fixed columns take their current widths and the "Task" column fills the rest; when the window narrows the task column stays at its minimum.
  *
- * 可用宽度取自滚动容器而不是表格本身：表格宽度由列宽撑开，读 `grid.clientWidth`
- * 会形成“表格不缩→任务列不缩→表格更不缩”的死循环，窗口缩小时只剩横向滚动。
+ * Available width comes from the scroll container, not the table itself: the table width is driven by column widths, so reading `grid.clientWidth`
+ * creates the loop "table won't shrink → task column won't shrink → table won't shrink", leaving only horizontal scrolling when the window shrinks.
  */
 function applyColumnWidths(): void {
   const widths = currentFixedWidths();
@@ -536,7 +640,7 @@ function saveColumnWidths(): void {
   try {
     localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(currentFixedWidths()));
   } catch {
-    // 只影响“下次还记得”，本次拖动已经生效。
+    // Only affects whether this is remembered next time; this drag has already taken effect.
   }
 }
 
@@ -544,7 +648,7 @@ function columnWidthOf(key: ResizableColumn, widths: Record<FixedColumn, number>
   return key === "title" ? titleColumnWidth : widths[key as FixedColumn];
 }
 
-/** 当前所有列的显示宽度，拖动开始时取一次快照，后续位移都基于它计算。 */
+/** Current display widths of all columns; snapshot once when a drag starts, and compute later movement from it. */
 function columnWidthsSnapshot(): Record<ResizableColumn, number> {
   const fixed = currentFixedWidths();
   const out = {} as Record<ResizableColumn, number>;
@@ -561,10 +665,10 @@ function applyWidths(widths: Record<ResizableColumn, number>): void {
 }
 
 /**
- * 把一次水平位移分给分界线两侧：
- * - 向右拖：线右侧从近到远依次让出空间，直到最小宽度；左侧只增加右侧真正让出的量。
- * - 向左拖：线左侧从近到远依次让出空间；右侧只增加左侧真正让出的量。
- * 这样某一侧已经到最小宽度时，会自然带动同侧更远的列，而不是把线卡死。
+ * Distribute one horizontal movement across the two sides of a boundary:
+ * - Drag right: the right side yields space from near to far until its minimum; the left gains only what the right actually yielded.
+ * - Drag left: the left side yields space from near to far; the right gains only what the left actually yielded.
+ * So when one side is already at its minimum, columns farther on that side move too instead of the line getting stuck.
  */
 function cascadeWidths(
   start: Record<ResizableColumn, number>,
@@ -620,7 +724,12 @@ function showResizeTip(
 ): void {
   const leftWidth = Math.round(widths[left]);
   const rightWidth = Math.round(widths[right]);
-  dom.resizeTip.textContent = `${COLUMN_LABELS[left]} ${leftWidth}px · ${COLUMN_LABELS[right]} ${rightWidth}px`;
+  dom.resizeTip.textContent = t("column.resizeTip", {
+    left: t(COLUMN_KEYS[left]),
+    leftWidth,
+    right: t(COLUMN_KEYS[right]),
+    rightWidth,
+  });
   dom.resizeTip.hidden = false;
   const leftPosition = Math.min(
     window.innerWidth - dom.resizeTip.offsetWidth - 8,
@@ -676,9 +785,9 @@ function beginColumnResize(
 }
 
 /**
- * 表头每一条分界线都是拖动把手：拖动时同时改变线两侧的列，总宽度不变；
- * 一侧到最小宽度后继续拖动，会按列顺序带动同侧更远的列。
- * 悬停时两侧表头一起变色，拖动时浮出两列当前宽度，避免“只动了其中一列”的错觉。
+ * Every header boundary is a drag handle: dragging changes the columns on both sides at once, keeping total width constant;
+ * past a side's minimum width, further dragging moves columns farther out on that side in column order.
+ * On hover both headers light up; while dragging, both current widths float up, avoiding the illusion that "only one column moved".
  */
 function initColumnResizing(): void {
   applyColumnWidths();
@@ -686,7 +795,7 @@ function initColumnResizing(): void {
     const boundary = handle.dataset.boundary?.split(":");
     if (!boundary || boundary.length !== 2) continue;
     const [left, right] = boundary as [ResizableColumn, ResizableColumn];
-    handle.title = "拖动调整列宽（到最小后带动相邻列）";
+    handle.title = t("column.resizeHandle");
     handle.addEventListener("pointerdown", (event) => beginColumnResize(event, left, right));
 
     const highlight = (on: boolean): void => {
@@ -703,7 +812,7 @@ function initColumnResizing(): void {
 }
 
 // ---------------------------------------------------------------------------
-// 左栏宽度
+// Sidebar width
 // ---------------------------------------------------------------------------
 
 const SIDEBAR_STORAGE_KEY = "knot.sidebarWidth.v1";
@@ -711,12 +820,12 @@ const SIDEBAR_DEFAULT_WIDTH = 280;
 const SIDEBAR_MIN_WIDTH = 180;
 const SIDEBAR_MAX_WIDTH = 420;
 
-/** 主区至少留 360px；窗口变窄时上限跟着收。 */
+/** Leave at least 360px for the main area; the maximum shrinks as the window narrows. */
 function sidebarMaxWidth(): number {
   return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - 360));
 }
 
-/** 应用宽度并返回实际夹紧后的值。 */
+/** Apply a width and return the actual clamped value. */
 function applySidebarWidth(width: number): number {
   const clamped = Math.round(
     Math.min(sidebarMaxWidth(), Math.max(SIDEBAR_MIN_WIDTH, width)),
@@ -725,7 +834,7 @@ function applySidebarWidth(width: number): number {
   dom.sidebarResizer.setAttribute("aria-valuemin", String(SIDEBAR_MIN_WIDTH));
   dom.sidebarResizer.setAttribute("aria-valuemax", String(sidebarMaxWidth()));
   dom.sidebarResizer.setAttribute("aria-valuenow", String(clamped));
-  // 左栏变宽 / 变窄也会改变表格可用宽度，任务列要跟着重算。
+  // A wider / narrower sidebar changes the table's available width, so the task column must be recomputed too.
   applyColumnWidths();
   return clamped;
 }
@@ -734,7 +843,7 @@ function saveSidebarWidth(width: number): void {
   try {
     localStorage.setItem(SIDEBAR_STORAGE_KEY, String(width));
   } catch {
-    // 存不下就只在本会话生效。
+    // If it cannot be stored, it applies to this session only.
   }
 }
 
@@ -792,19 +901,19 @@ function initSidebarResizing(): void {
 }
 
 // ---------------------------------------------------------------------------
-// 列排序
+// Column sorting
 // ---------------------------------------------------------------------------
 
 const SORTABLE_FIELDS: readonly SortField[] = ["priority", "created", "start", "end"];
 
-const SORT_LABELS: Record<SortField, string> = {
-  priority: "优先级",
-  created: "创建时间",
-  start: "开始时间",
-  end: "结束时间",
+const SORT_KEYS: Record<SortField, MessageKey> = {
+  priority: "sort.priority",
+  created: "sort.created",
+  start: "sort.start",
+  end: "sort.end",
 };
 
-/** 列名右侧按钮：升序 → 降序 → 恢复默认排序。 */
+/** Button right of a column name: ascending → descending → restore default order. */
 function cycleColumnSort(field: SortField): void {
   const current = state.sort;
   if (current === null || current.field !== field) {
@@ -825,23 +934,23 @@ function initColumnSorting(): void {
   }
 }
 
-/** 箭头、提示与 `aria-sort` 跟着 state.sort 走。 */
+/** Arrow, tooltip and `aria-sort` follow state.sort. */
 function renderSortIndicators(): void {
   for (const button of dom.grid.querySelectorAll<HTMLButtonElement>(".sort-btn")) {
     const field = button.dataset.sort as SortField | undefined;
     if (field === undefined) continue;
 
     const direction = state.sort?.field === field ? state.sort.direction : null;
-    const label = SORT_LABELS[field];
+    const label = t(SORT_KEYS[field]);
     button.textContent = direction === "asc" ? "▲" : direction === "desc" ? "▼" : "⇅";
     button.classList.toggle("is-active", direction !== null);
 
     const hint =
       direction === "asc"
-        ? `${label}升序，点击切换为降序`
+        ? t("sort.ascHint", { label })
         : direction === "desc"
-          ? `${label}降序，点击恢复默认排序`
-          : `按${label}升序排序`;
+          ? t("sort.descHint", { label })
+          : t("sort.defaultHint", { label });
     button.title = hint;
     button.setAttribute("aria-label", hint);
     button
@@ -854,15 +963,15 @@ function renderSortIndicators(): void {
 }
 
 // ---------------------------------------------------------------------------
-// 加载
+// Loading
 // ---------------------------------------------------------------------------
 
-/** 取回当前容器的全部数据并重画。所有写操作之后都调它。 */
+/** Fetch all data for the current container and redraw. Called after every write. */
 async function reload(): Promise<void> {
   try {
     state.projects = await api.listProjects();
 
-    // 第一次加载才恢复上次项目；之后的 reload 必须尊重用户当前的选择。
+    // Restore the last project only on first load; later reloads must respect the user's current choice.
     if (!startupProjectRestored) {
       startupProjectRestored = true;
       const saved = readSavedProjectId();
@@ -877,13 +986,13 @@ async function reload(): Promise<void> {
           try {
             localStorage.removeItem(PROJECT_STORAGE_KEY);
           } catch {
-            // 忽略：无效值不阻塞启动。
+            // Ignore: an invalid value does not block startup.
           }
         }
       }
     }
 
-    // 取成局部量：容器在 await 之间可能被用户切走，一次重画只认一个容器。
+    // Take local copies: the user may switch containers between awaits, so one redraw honors one container.
     const container = state.container;
     const projectId = state.projectId;
     if (projectId !== null) {
@@ -910,9 +1019,9 @@ async function reload(): Promise<void> {
 async function selectProject(project: Project): Promise<void> {
   const isTodo = project.isTodo || project.id === null;
   state.container = isTodo ? { kind: "todo" } : { kind: "project", id: project.id as number };
-  // 切到「我的待办」不清空项目上下文：左栏项目名和模块树要继续可见。
+  // Switching to "My tasks" does not clear the project context: the sidebar project name and module tree stay visible.
   if (!isTodo) state.projectId = project.id;
-  // 换容器等于换了一棵树：范围回到"整个项目"，收起状态也没有意义了。
+  // A different container is a different tree: reset the scope to "whole project"; collapse state no longer applies.
   state.scope = { kind: "project" };
   state.collapsedNodes.clear();
   state.collapsedGroups.clear();
@@ -924,7 +1033,7 @@ async function selectProject(project: Project): Promise<void> {
   await reload();
 }
 
-/** 父任务没了（删除或换容器）就把内联输入收回，别停在一个不存在的父任务上。 */
+/** If the parent is gone (deleted or container switched), retract the inline input instead of staying on a nonexistent parent. */
 function pruneSubtaskInput(): void {
   if (state.addingSubtaskFor === null) return;
   const parent = state.tasks.find(
@@ -937,11 +1046,11 @@ function pruneSubtaskInput(): void {
 }
 
 // ---------------------------------------------------------------------------
-// 渲染
+// Rendering
 // ---------------------------------------------------------------------------
 
 function render(): void {
-  // 表格用当前容器的任务；左栏树始终展示项目上下文（切到「我的待办」时也保留）。
+  // The table uses the current container's tasks; the sidebar tree always shows the project context (kept when switching to "My tasks").
   const groups = buildGroups(state.tasks, state.modules, state.sort);
   const sidebarGroups =
     state.projectId !== null ? buildGroups(state.projectTasks, state.modules) : groups;
@@ -949,7 +1058,7 @@ function render(): void {
   renderToolbar(groups);
   renderTable(groups);
   renderSortIndicators();
-  // 数据量变化可能让纵向滚动条出现 / 消失，任务列的剩余宽度要跟着重算。
+  // Changing data volume may add / remove the vertical scrollbar, so the task column's remaining width must be recomputed.
   applyColumnWidths();
 }
 
@@ -961,7 +1070,7 @@ function renderSidebar(groups: Group[]): void {
 
   const project = currentProject();
   const hasProject = state.projectId !== null && project !== undefined && !project.isTodo;
-  dom.projectHeading.textContent = hasProject ? project.name : "";
+  dom.projectHeading.textContent = hasProject ? projectName(project) : "";
   dom.projectHeading.hidden = !hasProject;
 
   renderScopeTree(groups);
@@ -971,30 +1080,30 @@ function renderSideItem(project: Project): HTMLButtonElement {
   const button = el("button", "side-item");
   button.type = "button";
   button.classList.toggle("selected", isCurrent(project));
-  button.title = project.name;
+  button.title = projectName(project);
 
   button.append(
-    el("span", "side-name", project.name),
+    el("span", "side-name", projectName(project)),
     el("span", "side-count", String(project.taskCount)),
   );
   button.addEventListener("click", () => {
     void selectProject(project);
   });
 
-  // 右键：项目上没有结构可管时不打开菜单（「我的待办」就属于这种）。
-  // 原生右键菜单由 boot() 里的全局监听统一禁用。
+  // Right-click: do not open a menu when the project has no structure to manage ("My tasks" is one such case).
+  // The native context menu is disabled globally by the listener in boot().
   button.addEventListener("contextmenu", (event) => {
     if (project.isTodo || project.id === null) return;
     const projectId = project.id;
     event.preventDefault();
     openMenu({
       items: [
-        { label: "新建模块", onSelect: () => void createModuleIn(projectId) },
+        { label: t("nav.newModule"), onSelect: () => void createModuleIn(projectId) },
         {
-          label: "重命名项目",
+          label: t("nav.renameProject"),
           onSelect: () => renameNode({ kind: "project", id: projectId, name: project.name }),
         },
-        { label: "删除项目", onSelect: () => void deleteProjectFlow(project) },
+        { label: t("nav.deleteProject"), onSelect: () => void deleteProjectFlow(project) },
       ],
       position: { kind: "point", x: event.clientX, y: event.clientY },
     });
@@ -1003,7 +1112,7 @@ function renderSideItem(project: Project): HTMLButtonElement {
   return button;
 }
 
-/** 左栏当前项目名：右键菜单（新建模块 / 重命名 / 删除）与双击重命名。 */
+/** Sidebar current project name: context menu (new module / rename / delete) and double-click rename. */
 function initProjectHeading(): void {
   dom.projectHeading.addEventListener("dblclick", () => {
     const project = currentProject();
@@ -1012,7 +1121,7 @@ function initProjectHeading(): void {
   });
 
   dom.projectHeading.addEventListener("contextmenu", (event) => {
-    // 正在原地改名时不抢输入框的右键。
+    // While renaming in place, do not steal the input's right-click.
     if (event.target instanceof HTMLInputElement) return;
     const project = currentProject();
     if (!project || project.isTodo || project.id === null) return;
@@ -1020,12 +1129,12 @@ function initProjectHeading(): void {
     const projectId = project.id;
     openMenu({
       items: [
-        { label: "新建模块", onSelect: () => void createModuleIn(projectId) },
+        { label: t("nav.newModule"), onSelect: () => void createModuleIn(projectId) },
         {
-          label: "重命名项目",
+          label: t("nav.renameProject"),
           onSelect: () => renameNode({ kind: "project", id: projectId, name: project.name }),
         },
-        { label: "删除项目", onSelect: () => void deleteProjectFlow(project) },
+        { label: t("nav.deleteProject"), onSelect: () => void deleteProjectFlow(project) },
       ],
       position: { kind: "point", x: event.clientX, y: event.clientY },
     });
@@ -1033,8 +1142,8 @@ function initProjectHeading(): void {
 }
 
 /**
- * 左栏空白处右键：同样能给当前项目新建模块。
- * 项目行 / 范围行 / 开发按钮自己处理右键（已 preventDefault），这里只兜底空白区域。
+ * Right-click on sidebar whitespace: also creates a module in the current project.
+ * Project rows / scope rows / the dev button handle their own right-clicks (already preventDefault), so this only covers empty areas.
  */
 function initSidebarContextMenu(): void {
   dom.sidebar.addEventListener("contextmenu", (event) => {
@@ -1049,7 +1158,7 @@ function initSidebarContextMenu(): void {
     }
     event.preventDefault();
     openMenu({
-      items: [{ label: "新建模块", onSelect: () => void createModuleIn(projectId) }],
+      items: [{ label: t("nav.newModule"), onSelect: () => void createModuleIn(projectId) }],
       position: { kind: "point", x: event.clientX, y: event.clientY },
     });
   });
@@ -1068,9 +1177,38 @@ function currentProject(): Project | undefined {
   return state.projects.find((p) => p.isTodo);
 }
 
+/** The virtual todo container has no stored name; render its label from `isTodo`. */
+function projectName(project: Project): string {
+  return project.isTodo ? t("nav.todo") : project.name;
+}
+
+/** Display name of a scope; the derived default group has no stored label. */
+function scopeLabel(groups: readonly Group[], scope: Scope): string {
+  switch (scope.kind) {
+    case "project":
+      return t("scope.all");
+    case "unclassified":
+      return t("scope.default");
+    case "module":
+      return (
+        groups.find((group) => group.kind === "module" && group.id === scope.id)?.label ??
+        t("scope.module")
+      );
+    case "submodule": {
+      for (const group of groups) {
+        const child = group.children.find(
+          (node) => node.kind === "submodule" && node.id === scope.id,
+        );
+        if (child) return child.label ?? t("scope.submodule");
+      }
+      return t("scope.submodule");
+    }
+  }
+}
+
 /**
- * 左栏范围树：整个项目 / 模块 / 子模块 / 默认。点哪个就把主视图限定在哪个子树。
- * 「我的待办」没有模块，也就没有这层树。
+ * Sidebar scope tree: whole project / module / submodule / default. Clicking one limits the main view to that subtree.
+ * "My tasks" has no modules, so it has no such tree.
  */
 function renderScopeTree(groups: Group[]): void {
   dom.scopeSection.replaceChildren();
@@ -1082,19 +1220,19 @@ function renderScopeTree(groups: Group[]): void {
   dom.scopeSection.append(
     renderScopeNode({
       scope: { kind: "project" },
-      label: "全部",
+      label: t("scope.all"),
       count: countGroups(groups),
       indent: 0,
     }),
   );
 
-  // 「默认」排在模块之前，与表格分组顺序一致；空默认分组不占一行。
+  // "Default" comes before modules, matching table group order; an empty default group takes no row.
   const unclassified = groups.find((group) => group.kind === "unclassified");
   if (unclassified) {
     dom.scopeSection.append(
       renderScopeNode({
         scope: { kind: "unclassified" },
-        label: unclassified.label,
+        label: unclassified.label ?? t("scope.default"),
         count: countGroup(unclassified),
         indent: 0,
       }),
@@ -1108,7 +1246,7 @@ function renderScopeTree(groups: Group[]): void {
     dom.scopeSection.append(
       renderScopeNode({
         scope: { kind: "module", id: group.id },
-        label: group.label,
+        label: group.label ?? t("scope.module"),
         count: countGroup(group),
         indent: 0,
         ...(group.children.length > 0 ? { collapsible: { id: group.id, collapsed } } : {}),
@@ -1121,7 +1259,7 @@ function renderScopeTree(groups: Group[]): void {
       dom.scopeSection.append(
         renderScopeNode({
           scope: { kind: "submodule", id: child.id },
-          label: child.label,
+          label: child.label ?? t("scope.submodule"),
           count: countGroup(child),
           indent: 1,
         }),
@@ -1135,7 +1273,7 @@ interface ScopeNodeOptions {
   label: string;
   count: { done: number; total: number };
   indent: 0 | 1;
-  /** 只有带子模块的模块节点才有折叠箭头 */
+  /** Only module nodes with submodules get a collapse caret */
   collapsible?: { id: number; collapsed: boolean };
 }
 
@@ -1146,11 +1284,11 @@ function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
 
   if (options.collapsible) {
     const { id, collapsed } = options.collapsible;
-    // 三角由 CSS 的 ::before 画，元素里不要放字符：
-    // 字面 ▾ 叠上伪元素就是两个三角（已经错过一次）。
+    // The triangle is drawn by CSS ::before; put no character in the element:
+    // a literal ▾ plus the pseudo-element makes two triangles (already got this wrong once).
     const caret = el("button", collapsed ? "scope-caret is-collapsed has-icon" : "scope-caret has-icon");
     caret.type = "button";
-    caret.title = collapsed ? "展开子模块" : "收起子模块";
+    caret.title = t(collapsed ? "common.expand" : "common.collapse");
     caret.setAttribute("aria-label", caret.title);
     caret.append(icon("chevron"));
     caret.addEventListener("click", () => {
@@ -1168,10 +1306,10 @@ function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
     name.dataset.kind = options.scope.kind;
     name.dataset.id = String(options.scope.id);
   }
-  // 模块 / 子模块双击名字直接改名；「全部」「默认」只是虚拟范围，没有可改的名字。
+  // Double-clicking a module / submodule name renames it in place; "All" and "Default" are virtual scopes with no name to edit.
   const scope = options.scope;
   if (scope.kind === "module") {
-    // 模块行可以上下拖动排序；子模块跟随自己的模块，不单独拖。
+    // Module rows can be dragged up/down to reorder; submodules move with their module and are not dragged alone.
     row.dataset.moduleId = String(scope.id);
     row.addEventListener("pointerdown", (event) =>
       beginModuleDrag(event, scope.id, row),
@@ -1194,7 +1332,7 @@ function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
   row.append(name, el("span", "scope-count", `${options.count.done}/${options.count.total}`));
 
   row.addEventListener("contextmenu", (event) => {
-    // 正在原地改名时不抢输入框的右键。
+    // While renaming in place, do not steal the input's right-click.
     if (event.target instanceof HTMLInputElement) return;
     const items = scopeMenuItems(options);
     if (items.length === 0) return;
@@ -1205,14 +1343,14 @@ function renderScopeNode(options: ScopeNodeOptions): HTMLElement {
   return row;
 }
 
-/** 当前渲染出的模块行，按左栏从上到下的顺序。子模块行不在其中。 */
+/** Currently rendered module rows, in sidebar top-to-bottom order. Submodule rows are not included. */
 function moduleRows(): HTMLElement[] {
   return Array.from(dom.scopeSection.querySelectorAll<HTMLElement>(".scope-row[data-module-id]"));
 }
 
 function beginModuleDrag(event: PointerEvent, id: number, row: HTMLElement): void {
   if (event.button !== 0) return;
-  // 原地改名时让输入框自己处理指针；右键留给菜单。
+  // While renaming in place, let the input handle the pointer itself; right-click stays with the menu.
   if (event.target instanceof HTMLInputElement) return;
   if (moduleDrag !== null) return;
 
@@ -1247,8 +1385,8 @@ function onModuleDragMove(event: PointerEvent): void {
 }
 
 /**
- * 指针落在第几行之前：逐个比较模块行的中线。落在最后一行中线以下就是序列末尾。
- * 子模块行不参与判断，拖到子模块上会按它所属模块的位置算。
+ * Which row the pointer falls before: compare module-row midlines one by one. Below the last row's midline is the end of the sequence.
+ * Submodule rows do not participate; dropping on a submodule counts as its owning module's position.
  */
 function moduleDropIndex(rows: readonly HTMLElement[], clientY: number): number {
   for (let index = 0; index < rows.length; index += 1) {
@@ -1266,7 +1404,7 @@ function updateModuleDropIndicator(rows: readonly HTMLElement[], clientY: number
   const dragIndex = rows.findIndex((row) => Number(row.dataset.moduleId) === drag.id);
   const insertion = moduleDropIndex(rows, clientY);
 
-  // 插在自己前面、或紧接自己后面，都等于没动：不画线，也不写库。
+  // Inserting before itself or immediately after itself is no move: draw no line and write nothing.
   if (dragIndex !== -1 && (insertion === dragIndex || insertion === dragIndex + 1)) {
     drag.insertion = null;
     return;
@@ -1286,7 +1424,7 @@ function clearModuleDropIndicator(): void {
   }
 }
 
-/** 拖到左栏上下边缘时继续滚，免得模块多到拖不过去。 */
+/** Keep scrolling when dragging to the sidebar's top/bottom edge, so many modules can still be dragged past. */
 function autoScrollSidebar(clientY: number): void {
   const rect = dom.sidebar.getBoundingClientRect();
   const edge = 24;
@@ -1307,10 +1445,10 @@ function endModuleDrag(event: PointerEvent): void {
   document.body.classList.remove("is-module-dragging");
   if (!drag.active) return;
 
-  // 拖完浏览器还会补一个 click；别让它顺手切了范围或折叠了分组。
+  // After the drag the browser still fires a click; do not let it switch scope or collapse a group.
   swallowNextClick();
 
-  // 手势被系统打断（pointercancel）：只收拾视觉状态，不提交顺序。
+  // Gesture interrupted by the system (pointercancel): only clean up visuals, do not commit the order.
   if (event.type === "pointercancel") return;
 
   const insertion = drag.insertion;
@@ -1322,7 +1460,7 @@ function endModuleDrag(event: PointerEvent): void {
   void persistModuleOrder(drag.id, beforeId);
 }
 
-/** 吞掉拖动结束后紧跟的那一次 click（左栏行上的单击、折叠箭头都算）。 */
+/** Swallow the one click that follows a finished drag (both sidebar row clicks and collapse carets). */
 function swallowNextClick(): void {
   const handler = (event: MouseEvent): void => {
     event.preventDefault();
@@ -1345,7 +1483,7 @@ async function persistModuleOrder(id: number, beforeId: number | null): Promise<
   }
 }
 
-/** 右键某个范围节点时能做什么。结构建在哪一级，菜单就长在哪一级。 */
+/** What a right-click on a scope node can do. The menu lives at the level where the structure is created. */
 function scopeMenuItems(options: ScopeNodeOptions): MenuItem[] {
   const { scope, label } = options;
 
@@ -1354,24 +1492,27 @@ function scopeMenuItems(options: ScopeNodeOptions): MenuItem[] {
       const projectId = state.projectId;
       return projectId === null
         ? []
-        : [{ label: "新建模块", onSelect: () => void createModuleIn(projectId) }];
+        : [{ label: t("nav.newModule"), onSelect: () => void createModuleIn(projectId) }];
     }
     case "module":
       return [
-        { label: "新建子模块", onSelect: () => void createSubmoduleIn(scope.id) },
+        { label: t("nav.newSubmodule"), onSelect: () => void createSubmoduleIn(scope.id) },
         {
-          label: "重命名模块",
+          label: t("nav.renameModule"),
           onSelect: () => renameNode({ kind: "module", id: scope.id, name: label }),
         },
-        { label: "删除模块", onSelect: () => void deleteNodeFlow("module", scope.id, label) },
+        { label: t("nav.deleteModule"), onSelect: () => void deleteNodeFlow("module", scope.id, label) },
       ];
     case "submodule":
       return [
         {
-          label: "重命名子模块",
+          label: t("nav.renameSubmodule"),
           onSelect: () => renameNode({ kind: "submodule", id: scope.id, name: label }),
         },
-        { label: "删除子模块", onSelect: () => void deleteNodeFlow("submodule", scope.id, label) },
+        {
+          label: t("nav.deleteSubmodule"),
+          onSelect: () => void deleteNodeFlow("submodule", scope.id, label),
+        },
       ];
     case "unclassified":
       return [];
@@ -1387,7 +1528,7 @@ function isScopeCurrent(scope: Scope): boolean {
 
 function applyScope(scope: Scope): void {
   state.scope = scope;
-  // 在「我的待办」里点模块树：切回当前项目，让表格显示对应范围。
+  // Clicking the module tree while in "My tasks": switch back to the current project so the table shows that scope.
   if (state.container.kind === "todo" && state.projectId !== null) {
     state.container = { kind: "project", id: state.projectId };
     state.addingSubtaskFor = null;
@@ -1410,14 +1551,16 @@ function renderToolbar(groups: Group[]): void {
   const { done, total } = countGroups(visible);
 
   renderFilters();
-  dom.statusCount.textContent = total === 0 ? "暂无任务" : `共 ${total} 项 · 已完成 ${done}`;
+  dom.statusCount.textContent =
+    total === 0 ? t("statusbar.noTasks") : tp("statusbar.count", total, { total, done });
 
-  // 提示语跟着范围走：新任务会落到哪里，先写清楚，不要让人点完才知道。
-  // 「全部」与「默认」的新任务都进默认分组，提示也保持一致。
-  const target = state.scope.kind === "project" ? "默认" : scopeLabel(groups, state.scope);
+  // The placeholder follows the scope: say up front where a new task will land, not only after the user commits.
+  // New tasks in both "All" and "Default" go to the default group, so their placeholders match.
+  const target =
+    state.scope.kind === "project" ? t("scope.default") : scopeLabel(groups, state.scope);
   dom.taskInput.placeholder = inProject
-    ? `添加到「${target}」，回车保存（优先级中）`
-    : "添加任务，回车保存（优先级中）";
+    ? t("task.addPlaceholderScoped", { target })
+    : t("task.addPlaceholder");
 }
 
 function currentFilters(): TaskFilters {
@@ -1431,19 +1574,19 @@ function renderFilters(): void {
   dom.filters.append(
     renderFilterGroup(
       "status",
-      "状态",
+      t("filter.status"),
       STATUS_ORDER.map((status) => ({
         value: status,
-        label: STATUS_LABELS[status],
+        label: statusLabel(status),
         active: state.statusFilter.has(status),
       })),
     ),
     renderFilterGroup(
       "priority",
-      "优先级",
+      t("filter.priority"),
       PRIORITY_ORDER.map((priority) => ({
         value: priority,
-        label: PRIORITY_LABELS[priority],
+        label: priorityLabel(priority),
         active: state.priorityFilter.has(priority),
         priority,
       })),
@@ -1461,7 +1604,7 @@ interface FilterOption {
 function renderFilterGroup(kind: FilterKind, label: string, options: FilterOption[]): HTMLElement {
   const group = el("div", "filter-group");
   group.setAttribute("role", "group");
-  group.setAttribute("aria-label", `${label}筛选`);
+  group.setAttribute("aria-label", t("filter.groupAria", { label }));
   group.append(el("span", "filter-label", label));
 
   for (const option of options) {
@@ -1492,7 +1635,7 @@ function toggleFilter(kind: FilterKind, value: string): void {
   }
 
   render();
-  // 全量重画会替换按钮；焦点送回刚切换的标签，键盘连续操作不中断。
+  // A full redraw replaces the button; return focus to the chip just toggled so keyboard use is not interrupted.
   dom.filters
     .querySelector<HTMLButtonElement>(
       `button[data-filter-kind="${kind}"][data-filter-value="${value}"]`,
@@ -1500,7 +1643,7 @@ function toggleFilter(kind: FilterKind, value: string): void {
     ?.focus();
 }
 
-/** 子任务按父任务归桶；桶内与组内父任务同一套排序（状态 → 优先级 → 创建时间）。 */
+/** Bucket subtasks by parent; each bucket uses the same ordering as parent tasks in a group (status → priority → creation time). */
 function groupChildren(tasks: readonly Task[]): Map<number, Task[]> {
   const map = new Map<number, Task[]>();
   for (const task of tasks) {
@@ -1518,7 +1661,7 @@ function renderTable(groups: Group[]): void {
   const filters = currentFilters();
   dom.body.replaceChildren();
 
-  // 「我的待办」没有模块，也就没有分组行：表格直接平铺。
+  // "My tasks" has no modules, so no group rows: the table is flat.
   if (state.container.kind === "todo") {
     const parents = sortTasks(
       state.tasks.filter((task) => task.parentTaskId === null),
@@ -1532,9 +1675,7 @@ function renderTable(groups: Group[]): void {
     );
     setEmptyState(
       !hasMatch,
-      parents.length === 0
-        ? "「我的待办」里还没有任务。在下面输入一行，回车保存。"
-        : "当前筛选下没有任务。调整上方的状态或优先级标签试试。",
+      parents.length === 0 ? t("empty.todo") : t("empty.filtered"),
     );
     focusSubtaskInput();
     return;
@@ -1544,13 +1685,14 @@ function renderTable(groups: Group[]): void {
   for (const group of visible) renderGroup(group, dom.body, childrenByParent, filters);
 
   const { total } = countGroups(visible);
-  const where = state.scope.kind === "project" ? "这个项目" : `「${scopeLabel(groups, state.scope)}」`;
+  const where =
+    state.scope.kind === "project"
+      ? t("empty.thisProject")
+      : t("empty.quoted", { label: scopeLabel(groups, state.scope) });
   const hasMatch = visible.some((group) => groupHasMatchingTaskTree(group, childrenByParent, filters));
   setEmptyState(
     !hasMatch,
-    total === 0
-      ? `${where}还没有任务。在下面输入一行，回车保存。`
-      : "当前筛选下没有任务。调整上方的状态或优先级标签试试。",
+    total === 0 ? t("empty.scope", { where }) : t("empty.filtered"),
   );
   focusSubtaskInput();
 }
@@ -1585,7 +1727,7 @@ function groupKey(group: Group): string {
   return `${group.kind}:${group.id ?? "-"}`;
 }
 
-/** 深度优先：分组行 → 组内任务（含子任务） → 子分组（缩进一级）。 */
+/** Depth-first: group row → tasks in the group (including subtasks) → child groups (indented one level). */
 function renderGroup(
   group: Group,
   host: HTMLElement,
@@ -1605,7 +1747,7 @@ function renderGroup(
 
   const caret = el("button", collapsed ? "group-caret is-collapsed has-icon" : "group-caret has-icon");
   caret.type = "button";
-  caret.title = collapsed ? "展开" : "收起";
+  caret.title = t(collapsed ? "common.expand" : "common.collapse");
   caret.setAttribute("aria-label", caret.title);
   caret.append(icon("chevron"));
   caret.addEventListener("click", () => {
@@ -1614,9 +1756,15 @@ function renderGroup(
     render();
   });
 
-  label.append(caret, el("span", undefined, group.label));
+  label.append(caret, el("span", undefined, group.label ?? t("scope.default")));
   if (group.children.length > 0) {
-    label.append(el("span", "group-meta", `${group.children.length} 个子模块`));
+    label.append(
+      el(
+        "span",
+        "group-meta",
+        tp("group.submoduleCount", group.children.length, { count: group.children.length }),
+      ),
+    );
   }
   label.append(el("span", "group-count", `${done}/${total}`));
 
@@ -1634,18 +1782,18 @@ function renderGroup(
 
 interface TaskRowOptions {
   isChild: boolean;
-  /** 当前筛选下会显示的子任务数，决定是否画折叠箭头。 */
+  /** Number of subtasks shown under the current filter; decides whether to draw the collapse caret. */
   childCount: number;
-  /** 子任务完成计数始终按全部子任务算，不受筛选影响。 */
+  /** Subtask done counts always use all subtasks and are unaffected by filters. */
   childDone: number;
   childTotal: number;
   isContext?: boolean;
 }
 
 /**
- * 父任务 + 默认展开的子任务 + 内联新增行。
+ * Parent task + expanded-by-default subtasks + inline add row.
  *
- * 父任务不命中但子任务命中时，父行作为灰显上下文保留；两者都不命中才整棵隐藏。
+ * When the parent misses but a subtask matches, keep the parent as dimmed context; hide the whole tree only when neither matches.
  */
 function renderTaskTree(
   task: Task,
@@ -1684,7 +1832,7 @@ function renderTaskRow(task: Task, options: TaskRowOptions): HTMLTableRowElement
   if (options.isChild) row.classList.add("row-subtask");
   if (options.isContext) {
     row.classList.add("is-context");
-    row.title = "筛选上下文：这个父任务本身不匹配当前筛选";
+    row.title = t("task.contextHint");
   }
   if (task.status === "done") row.classList.add("is-done");
 
@@ -1698,7 +1846,7 @@ function renderTaskRow(task: Task, options: TaskRowOptions): HTMLTableRowElement
     renderNoteCell(task),
   );
 
-  // 行内正在编辑时不抢右键：输入框里的右键仍交给浏览器默认行为处理。
+  // While editing in the row, do not steal right-click: right-clicks in an input still use the browser default.
   row.addEventListener("contextmenu", (event) => {
     if (
       event.target instanceof HTMLInputElement ||
@@ -1713,34 +1861,34 @@ function renderTaskRow(task: Task, options: TaskRowOptions): HTMLTableRowElement
   return row;
 }
 
-/** 任务右键菜单：指定状态 / 移动 / 升降级（顶层与子任务各一项）与删除。 */
+/** Task context menu: set status / move / demote or promote (one item each for top-level and subtasks) and delete. */
 function openTaskMenu(task: Task, event: MouseEvent): void {
   const items: MenuItem[] = [];
   const position: MenuPosition = { kind: "point", x: event.clientX, y: event.clientY };
 
-  // 状态格只能循环着找，右键把三态直接摆出来；当前状态打勾。
+  // The status cell can only cycle; the context menu lays out all three states directly, with the current one checked.
   items.push({
-    label: "设置状态…",
+    label: t("menu.setStatus"),
     children: STATUS_ORDER.map((status) => ({
-      label: STATUS_LABELS[status],
+      label: statusLabel(status),
       checked: status === task.status,
       onSelect: () => void changeStatus(task, status),
     })),
   });
 
   if (task.parentTaskId === null) {
-    items.push({ label: "移动到…", onSelect: () => void openMoveMenu(task, position) });
-    items.push({ label: "降为子任务…", onSelect: () => openDemoteMenu(task, position) });
+    items.push({ label: t("menu.moveTo"), onSelect: () => void openMoveMenu(task, position) });
+    items.push({ label: t("menu.demoteToSubtask"), onSelect: () => openDemoteMenu(task, position) });
   } else {
-    items.push({ label: "升为父任务", onSelect: () => void promoteTask(task) });
+    items.push({ label: t("menu.promoteToParent"), onSelect: () => void promoteTask(task) });
   }
-  // 删除和上面的结构操作隔开，免得在密集菜单里点错。
+  // Separate delete from the structural actions above so it is not clicked by mistake in a dense menu.
   items.push({ type: "separator", label: "" });
-  items.push({ label: "删除任务", onSelect: () => void deleteTaskFlow(task) });
+  items.push({ label: t("menu.deleteTask"), onSelect: () => void deleteTaskFlow(task) });
   openMenu({ items, position });
 }
 
-/** 目标父任务按当前容器的分组展示；子任务不能当父任务。 */
+/** Target parents are shown grouped like the current container; subtasks cannot become parents. */
 function demoteTargetItem(task: Task, target: Task): MenuItem {
   return { label: target.title, onSelect: () => void demoteTaskTo(task, target) };
 }
@@ -1753,17 +1901,20 @@ function demoteGroupItem(task: Task, group: Group): MenuItem | null {
 
   if (tasks.length === 0 && children.length === 0) return null;
   return {
-    label: group.label,
+    label: group.label ?? t("scope.default"),
     children: [...tasks.map((target) => demoteTargetItem(task, target)), ...children],
   };
 }
 
-/** 「降为子任务…」的第二级菜单：目标只能是当前容器里的顶层任务。 */
+/** Second-level "Demote to subtask…" menu: targets can only be top-level tasks in the current container. */
 function openDemoteMenu(task: Task, position: MenuPosition): void {
   const children = state.tasks.filter((candidate) => candidate.parentTaskId === task.id);
   if (children.length > 0) {
     showNotice(
-      `「${task.title}」还有 ${children.length} 个子任务，不能直接降级；请先删除或升为父任务`,
+      tp("menu.demoteHasChildren", children.length, {
+        title: task.title,
+        count: children.length,
+      }),
     );
     return;
   }
@@ -1772,7 +1923,7 @@ function openDemoteMenu(task: Task, position: MenuPosition): void {
     (candidate) => candidate.parentTaskId === null && candidate.id !== task.id,
   );
   if (targets.length === 0) {
-    showNotice("没有可挂靠的父任务");
+    showNotice(t("menu.noParentTargets"));
     return;
   }
 
@@ -1783,10 +1934,10 @@ function openDemoteMenu(task: Task, position: MenuPosition): void {
           .map((group) => demoteGroupItem(task, group))
           .filter((item): item is MenuItem => item !== null);
 
-  openMenu({ items, position, label: "降为子任务" });
+  openMenu({ items, position, label: t("menu.demoteLabel") });
 }
 
-/** 降级成功才重画；目标折叠着就先展开，让新子任务能被看到。 */
+/** Redraw only on successful demotion; if the target is collapsed, expand it so the new subtask is visible. */
 async function demoteTaskTo(task: Task, target: Task): Promise<void> {
   const clamped = PRIORITY_ORDER.indexOf(task.priority) < PRIORITY_ORDER.indexOf(target.priority);
   try {
@@ -1796,8 +1947,12 @@ async function demoteTaskTo(task: Task, target: Task): Promise<void> {
     flashTaskTree(target.id);
     showNotice(
       clamped
-        ? `已将「${task.title}」降为「${target.title}」的子任务，优先级调整为${PRIORITY_LABELS[target.priority]}`
-        : `已将「${task.title}」降为「${target.title}」的子任务`,
+        ? t("toast.demotedWithPriority", {
+            title: task.title,
+            target: target.title,
+            priority: priorityLabel(target.priority),
+          })
+        : t("toast.demoted", { title: task.title, target: target.title }),
     );
     for (const notice of outcome.notices) showNotice(notice);
   } catch (error) {
@@ -1805,13 +1960,13 @@ async function demoteTaskTo(task: Task, target: Task): Promise<void> {
   }
 }
 
-/** 升级成功才重画；原父任务若被聚合改动，提示由后端带回。 */
+/** Redraw only on successful promotion; if the former parent was changed by aggregation, the backend returns the notice. */
 async function promoteTask(task: Task): Promise<void> {
   try {
     const outcome = await api.reparentTask(task.id, null);
     await reload();
     flashTaskTree(task.id);
-    showNotice(`已将「${task.title}」升为父任务`);
+    showNotice(t("toast.promoted", { title: task.title }));
     for (const notice of outcome.notices) showNotice(notice);
   } catch (error) {
     showNotice(describe(error), "error");
@@ -1819,18 +1974,20 @@ async function promoteTask(task: Task): Promise<void> {
 }
 
 /**
- * 创建 / 开始 / 结束各一列，只读。创建时间在新建任务时写入；开始与结束
- * 随状态变化自动维护。表格里没有录入入口。
+ * One column each for created / start / end, read-only. Creation time is written when a task is created; start and end
+ * are maintained automatically with status changes. The table has no input entry for them.
  */
 function renderTimeCell(task: Task, field: TimeField): HTMLTableCellElement {
   const cell = el("td", "cell-time");
   const value =
     field === "created" ? task.createdAt : field === "start" ? task.startAt : task.endAt;
-  const label = `${TIME_LABELS[field]}时间`;
+  const label = t(TIME_LABEL_KEYS[field]);
   const span = el("span", value === null ? "time is-empty" : "time", formatSchedule(value));
-  span.title = `${label}：${value === null ? "未记录" : formatSchedule(value)}（${
-    TIME_HINTS[field]
-  }）`;
+  span.title = t("time.tooltip", {
+    label,
+    value: value === null ? t("time.notRecorded") : formatSchedule(value),
+    hint: t(TIME_HINT_KEYS[field]),
+  });
   span.setAttribute("aria-label", span.title);
   cell.append(span);
   return cell;
@@ -1840,8 +1997,11 @@ function renderStatusCell(task: Task): HTMLTableCellElement {
   const cell = el("td", "cell-status");
   const button = el("button", `status status-${task.status}`);
   button.type = "button";
-  button.title = `${STATUS_LABELS[task.status]}，点一下改为${STATUS_LABELS[NEXT_STATUS[task.status]]}`;
-  button.setAttribute("aria-label", `状态：${STATUS_LABELS[task.status]}`);
+  button.title = t("status.tooltip", {
+    current: statusLabel(task.status),
+    next: statusLabel(NEXT_STATUS[task.status]),
+  });
+  button.setAttribute("aria-label", t("status.aria", { status: statusLabel(task.status) }));
   button.append(
     icon(
       task.status === "done"
@@ -1860,12 +2020,13 @@ function renderStatusCell(task: Task): HTMLTableCellElement {
 
 function renderPriorityCell(task: Task): HTMLTableCellElement {
   const cell = el("td", "cell-priority");
-  const button = el("button", `priority priority-${task.priority}`, PRIORITY_LABELS[task.priority]);
+  const button = el("button", `priority priority-${task.priority}`, priorityLabel(task.priority));
   button.type = "button";
+  const level = priorityLabel(task.priority);
   button.title =
     task.parentTaskId === null
-      ? `优先级${PRIORITY_LABELS[task.priority]}（点击选择）`
-      : `优先级${PRIORITY_LABELS[task.priority]}（点击选择；不能高于父任务）`;
+      ? t("priority.tooltip", { level })
+      : t("priority.tooltipChild", { level });
   button.setAttribute("aria-haspopup", "menu");
   button.setAttribute("aria-expanded", "false");
   button.addEventListener("click", () => {
@@ -1878,10 +2039,10 @@ function renderPriorityCell(task: Task): HTMLTableCellElement {
 function renderTitleCell(task: Task, options: TaskRowOptions): HTMLTableCellElement {
   const cell = el("td", "cell-title");
   const title = el("span", "task-title", task.title);
-  title.title = "双击改名";
+  title.title = t("task.renameHint");
   title.addEventListener("dblclick", () => beginRename(title, task));
 
-  // 子任务到头了：没有箭头、没有「＋」，只靠缩进表达层级。
+  // Subtasks are the end of the line: no caret, no "+", hierarchy shown by indentation alone.
   if (options.isChild) {
     cell.append(title);
     return cell;
@@ -1896,14 +2057,14 @@ function renderTitleCell(task: Task, options: TaskRowOptions): HTMLTableCellElem
       collapsed ? "group-caret task-caret is-collapsed has-icon" : "group-caret task-caret has-icon",
     );
     caret.type = "button";
-    caret.title = collapsed ? "展开子任务" : "收起子任务";
+    caret.title = t(collapsed ? "task.expandSubtasks" : "task.collapseSubtasks");
     caret.setAttribute("aria-label", caret.title);
     caret.setAttribute("aria-expanded", String(!collapsed));
     caret.append(icon("chevron"));
     caret.addEventListener("click", () => toggleTaskCollapsed(task.id));
     wrap.append(caret);
   } else {
-    // 没有子任务也留出箭头宽度，标题不会因为有了子任务而左右跳。
+    // Reserve caret width even without subtasks, so the title does not shift when subtasks appear.
     wrap.append(el("span", "task-caret task-caret-empty"));
   }
 
@@ -1911,14 +2072,17 @@ function renderTitleCell(task: Task, options: TaskRowOptions): HTMLTableCellElem
 
   if (options.childTotal > 0) {
     const count = el("span", "task-count", `${options.childDone}/${options.childTotal}`);
-    count.title = `子任务已完成 ${options.childDone} 个，共 ${options.childTotal} 个`;
+    count.title = tp("task.subtaskDoneCount", options.childTotal, {
+      done: options.childDone,
+      total: options.childTotal,
+    });
     wrap.append(count);
   }
 
   const plus = el("button", "subtask-add");
   plus.type = "button";
-  plus.title = "添加子任务";
-  plus.setAttribute("aria-label", `给「${task.title}」添加子任务`);
+  plus.title = t("task.addSubtask");
+  plus.setAttribute("aria-label", t("task.addSubtaskFor", { title: task.title }));
   plus.append(icon("plus"));
   plus.addEventListener("click", () => openSubtaskInput(task.id));
   wrap.append(plus);
@@ -1934,9 +2098,9 @@ function toggleTaskCollapsed(id: number): void {
 }
 
 function openSubtaskInput(parentId: number): void {
-  // 无论是否已经在输入，都作废上一轮输入框的失焦回调。
+  // Whether or not input is already active, invalidate the previous input's blur callback.
   subtaskInputSession += 1;
-  state.collapsedTasks.delete(parentId); // 输入行跟在子任务后面，必须先展开
+  state.collapsedTasks.delete(parentId); // the input row follows the subtasks, so expand first
 
   if (state.addingSubtaskFor === parentId) {
     focusSubtaskInput();
@@ -1948,7 +2112,7 @@ function openSubtaskInput(parentId: number): void {
   render();
 }
 
-/** 父任务行下的内联子任务输入：回车连续添加，Esc 取消，失焦保存非空内容。 */
+/** Inline subtask input under a parent row: Enter keeps adding, Esc cancels, blur saves non-empty content. */
 function renderSubtaskAddRow(parent: Task): HTMLTableRowElement {
   const session = subtaskInputSession;
   const row = el("tr", "row-subtask-add");
@@ -1957,7 +2121,7 @@ function renderSubtaskAddRow(parent: Task): HTMLTableRowElement {
 
   const input = el("input", "subtask-input");
   input.value = subtaskDraft;
-  input.placeholder = "添加子任务，回车保存";
+  input.placeholder = t("task.subtaskPlaceholder");
   input.autocomplete = "off";
   input.spellcheck = false;
 
@@ -1975,7 +2139,7 @@ function renderSubtaskAddRow(parent: Task): HTMLTableRowElement {
       return;
     }
 
-    // 先重绘清空输入框，再发命令；失败会把草稿放回来。
+    // Redraw to clear the input first, then send the command; on failure the draft is restored.
     render();
     void submitSubtask(parent, title);
   };
@@ -1992,12 +2156,12 @@ function renderSubtaskAddRow(parent: Task): HTMLTableRowElement {
       finish(false, false);
     }
   });
-  // 失焦保存非空内容，与就地改名同一理由。延后一拍：点另一个「＋」时
-  // blur 先于 click，同步重绘会把按钮换掉、吞掉紧接着的 click。
+  // Blur saves non-empty content, for the same reason as in-place rename. Defer one tick: when clicking another "+",
+  // blur fires before click, and a synchronous redraw would replace the button and swallow the following click.
   input.addEventListener("blur", () => {
     window.setTimeout(() => {
-      // `isConnected` 用来区分“用户点了别处”和“重绘把这个输入框换掉了”：
-      // 后者也会触发 blur，但输入框已经不在文档里，不能当成提交。
+      // `isConnected` distinguishes "the user clicked elsewhere" from "a redraw replaced this input":
+      // the latter also fires blur, but the input is no longer in the document and must not count as a submit.
       if (settled || !input.isConnected) return;
       if (session !== subtaskInputSession) return;
       if (state.addingSubtaskFor !== parent.id) return;
@@ -2030,7 +2194,7 @@ async function submitSubtask(parent: Task, title: string): Promise<void> {
     await reload();
     for (const notice of created.notices) showNotice(notice);
   } catch (error) {
-    // 失败把草稿放回去，别因为一次后端拒绝丢掉刚打的字。
+    // On failure put the draft back; do not lose what was typed because of one backend rejection.
     state.addingSubtaskFor = parent.id;
     subtaskDraft = title;
     render();
@@ -2040,28 +2204,28 @@ async function submitSubtask(parent: Task, title: string): Promise<void> {
 
 function renderNoteCell(task: Task): HTMLTableCellElement {
   const cell = el("td", "cell-note");
-  // 摘要：换行与连续空白折成单个空格，DOM 里永远是单行。
+  // Summary: newlines and runs of whitespace collapse to single spaces, so the DOM always holds one line.
   const summary = task.note.trim().replace(/\s+/g, " ");
-  const button = el("button", summary ? "note" : "note is-empty", summary || "—");
+  const button = el("button", summary ? "note" : "note is-empty", summary || t("common.dash"));
   button.type = "button";
-  button.title = "编辑备注";
-  button.setAttribute("aria-label", `备注：${summary || "空"}`);
+  button.title = t("note.edit");
+  button.setAttribute("aria-label", t("note.aria", { summary: summary || t("note.empty") }));
   button.addEventListener("click", () => void editNote(task));
   cell.append(button);
   return cell;
 }
 
 // ---------------------------------------------------------------------------
-// 写操作（格内编辑）
+// Write operations (in-cell editing)
 // ---------------------------------------------------------------------------
 
-/** 备注：弹窗里原样编辑，空串表示清空；没改就不发命令。 */
+/** Note: edited as-is in a dialog; an empty string clears it; no change means no command. */
 async function editNote(task: Task): Promise<void> {
   const note = await askNote({
-    title: "备注",
-    label: `「${task.title}」`,
+    title: t("note.title"),
+    label: t("note.dialogLabel", { title: task.title }),
     value: task.note,
-    confirmText: "保存",
+    confirmText: t("common.save"),
   });
   if (note === null || note === task.note) return;
 
@@ -2084,7 +2248,7 @@ function isSameTarget(task: Task, target: MoveTarget): boolean {
   );
 }
 
-/** 当前目标不能再选一次，直接不出现在菜单里。 */
+/** The current target cannot be chosen again, so it simply does not appear in the menu. */
 function moveTargetItem(task: Task, label: string, target: MoveTarget): MenuItem | null {
   return isSameTarget(task, target)
     ? null
@@ -2092,13 +2256,13 @@ function moveTargetItem(task: Task, label: string, target: MoveTarget): MenuItem
 }
 
 /**
- * 移动目标按「项目 → 模块 → 子模块」折叠成树：默认只露出我的待办和项目，
- * 展开项目才看到默认和模块，模块再展开才看到子模块。
- * 菜单里的短标签靠层级表达归属，不再重复写完整的 `项目 › 模块 › 子模块`。
+ * Move targets fold into a "project → module → submodule" tree: by default only My tasks and projects show;
+ * expanding a project reveals Default and its modules; expanding a module reveals its submodules.
+ * Short labels in the menu express ownership through hierarchy, instead of repeating the full `project › module › submodule`.
  */
 async function moveMenuItems(task: Task): Promise<MenuItem[]> {
   const items: MenuItem[] = [];
-  const todo = moveTargetItem(task, "我的待办", {
+  const todo = moveTargetItem(task, t("nav.todo"), {
     container: { kind: "todo" },
     moduleId: null,
     submoduleId: null,
@@ -2114,7 +2278,7 @@ async function moveMenuItems(task: Task): Promise<MenuItem[]> {
     const container: Container = { kind: "project", id: project.id };
     const children: MenuItem[] = [];
 
-    const unclassified = moveTargetItem(task, "默认", {
+    const unclassified = moveTargetItem(task, t("scope.default"), {
       container,
       moduleId: null,
       submoduleId: null,
@@ -2132,9 +2296,9 @@ async function moveMenuItems(task: Task): Promise<MenuItem[]> {
         return item === null ? [] : [item];
       });
 
-      const wholeModule = moveTargetItem(task, "整个模块", moduleTarget);
+      const wholeModule = moveTargetItem(task, t("menu.moveWholeModule"), moduleTarget);
       if (submoduleItems.length === 0) {
-        // 没有子模块可展开：模块直接当叶子项，省掉一层点击。
+        // No submodules to expand: make the module a leaf item, saving one click.
         if (wholeModule) children.push({ ...wholeModule, label: module.name });
         continue;
       }
@@ -2144,51 +2308,51 @@ async function moveMenuItems(task: Task): Promise<MenuItem[]> {
       });
     }
 
-    if (children.length > 0) items.push({ label: project.name, children });
+    if (children.length > 0) items.push({ label: projectName(project), children });
   });
 
   return items;
 }
 
 /**
- * 「移动到…」的第二级菜单：仍用同一个 `openMenu`，在右键位置重新弹出。
- * 项目 → 模块 → 子模块 由菜单组件弹成侧向子面板，父面板不重排。
- * 当前位置不出现在列表里。
+ * Second-level "Move to…" menu: still uses the same `openMenu`, reopened at the right-click position.
+ * Project → module → submodule are opened as side panels by the menu component; the parent panel never reflows.
+ * The current location does not appear in the list.
  */
 async function openMoveMenu(task: Task, position: MenuPosition): Promise<void> {
   try {
     const items = await moveMenuItems(task);
     if (items.length === 0) {
-      showNotice("没有可移动到的位置");
+      showNotice(t("menu.noMoveTargets"));
       return;
     }
 
-    openMenu({ items, position, label: "移动到" });
+    openMenu({ items, position, label: t("menu.moveLabel") });
   } catch (error) {
     showNotice(describe(error), "error");
   }
 }
 
-/** 移动成功才重画并提示；失败保持原样，别把行凭空弄丢。 */
+/** Redraw and notify only on successful move; leave things as they are on failure, never make a row vanish. */
 async function moveTaskTo(task: Task, target: MoveTarget): Promise<void> {
   try {
     await api.moveTask(task.id, target);
     await reload();
     flashTaskTree(task.id);
-    showNotice(`已移动「${task.title}」`);
+    showNotice(t("toast.moved", { title: task.title }));
   } catch (error) {
     showNotice(describe(error), "error");
   }
 }
 
-/** 状态格点击：三态循环到下一个。 */
+/** Status cell click: cycle to the next of the three states. */
 async function cycleStatus(task: Task): Promise<void> {
   await changeStatus(task, NEXT_STATUS[task.status]);
 }
 
 /**
- * 指定状态（状态格循环与右键「设置状态…」共用）：plan 先问"要不要确认"，
- * needs_confirm 为真才弹窗，再 apply。目标与当前相同就不写库。
+ * Set a status (shared by status-cell cycling and the right-click "Set status…" menu): plan first asks "is confirmation needed";
+ * show the dialog only when needs_confirm is true, then apply. If the target equals the current status, nothing is written.
  */
 async function changeStatus(task: Task, next: Status): Promise<void> {
   if (next === task.status) return;
@@ -2198,9 +2362,9 @@ async function changeStatus(task: Task, next: Status): Promise<void> {
 
     if (plan.needsConfirm) {
       const confirmed = await askConfirm({
-        title: `标记为${STATUS_LABELS[next]}？`,
-        body: plan.reason,
-        confirmText: "确定",
+        title: t("confirm.markAs", { status: statusLabel(next) }),
+        body: plan.reason ? translateBackendMessage(plan.reason) : t("error.unknown"),
+        confirmText: t("common.confirm"),
       });
       if (!confirmed) return;
       cascade = true;
@@ -2208,10 +2372,10 @@ async function changeStatus(task: Task, next: Status): Promise<void> {
 
     const outcome = await api.applySetStatus(task.id, next, cascade);
     await reload();
-    // 「已完成」未勾选时，任务完成会立刻离开视图；先说明它去哪了，别让操作看起来没生效。
+    // When "Done" is not checked, completing a task removes it from the view immediately; say where it went so the action does not look ineffective.
     const stillVisible = document.querySelector(`tr[data-task-id="${task.id}"]`) !== null;
     if (next === "done" && !stillVisible) {
-      showNotice("任务已完成，已从当前视图隐藏");
+      showNotice(t("task.completedHidden"));
     }
     for (const notice of outcome.notices) showNotice(notice);
   } catch (error) {
@@ -2219,9 +2383,9 @@ async function changeStatus(task: Task, next: Status): Promise<void> {
   }
 }
 
-/** 优先级浮窗。改完行会按组内排序跳走，给新位置一次短暂高亮。 */
+/** Priority popover. After the change the row jumps by in-group order, so give the new position a brief highlight. */
 function openPriorityMenu(anchor: HTMLButtonElement, task: Task): void {
-  // 子任务的可选档位以父任务为上限：更高的选项根本不出现。
+  // A subtask's choices are capped by its parent's level: higher options simply do not appear.
   const parent =
     task.parentTaskId === null
       ? null
@@ -2233,20 +2397,20 @@ function openPriorityMenu(anchor: HTMLButtonElement, task: Task): void {
 
   openMenu({
     items: choices.map((priority) => ({
-      label: PRIORITY_LABELS[priority],
+      label: priorityLabel(priority),
       checked: priority === task.priority,
       onSelect: () => {
         if (priority !== task.priority) void applyPriority(task, priority);
       },
     })),
     position: { kind: "anchor", element: anchor },
-    label: "优先级",
+    label: t("priority.label"),
     restoreFocus: anchor,
   });
 }
 
 async function applyPriority(task: Task, priority: Priority): Promise<void> {
-  // 降到比某些子任务还低时，后端会把它们一并降档；先数一下，回来给条提示。
+  // Lowering below some subtasks makes the backend lower them too; count them first, then show a notice afterward.
   const cascaded =
     task.parentTaskId === null
       ? state.tasks.filter(
@@ -2259,33 +2423,35 @@ async function applyPriority(task: Task, priority: Priority): Promise<void> {
   try {
     await api.setPriority(task.id, priority);
     await reload();
-    if (cascaded > 0) showNotice(`已同步下调 ${cascaded} 个子任务的优先级`);
-    // 父任务改档位时整棵树会重排，多闪一秒让人跟住新位置。
+    if (cascaded > 0) {
+      showNotice(tp("toast.priorityCascaded", cascaded, { count: cascaded }));
+    }
+    // Changing a parent's level reorders the whole tree, so flash one second longer to help track the new position.
     flashTaskTree(task.id, task.parentTaskId === null);
   } catch (error) {
     showNotice(describe(error), "error");
   }
 }
 
-/** 就地改名：只替换标题本身，父任务的箭头、计数和「＋」留在原位。 */
+/** In-place rename: replace only the title itself; the parent's caret, count and "+" stay put. */
 function beginRename(title: HTMLSpanElement, task: Task): void {
   const cell = title.closest<HTMLTableCellElement>("td");
   if (!cell || cell.querySelector(".title-input")) return;
 
-  // 用 textarea 而不是 input：标题超出一行时，编辑框要跟着换行并长高，
-  // 与只读状态看到的排版一致；Enter 仍然提交，不插入换行。
+  // Use textarea rather than input: when the title exceeds one line, the editor must wrap and grow with it,
+  // matching the read-only layout; Enter still submits and does not insert a newline.
   const input = el("textarea", "title-input");
   input.rows = 1;
   input.value = task.title;
   input.spellcheck = false;
   input.autocomplete = "off";
-  // 父任务的标题在 flex 行里：输入框从标题原位铺到单元格右侧，计数和「＋」先让位。
+  // A parent's title sits in a flex row: the input spans from the title's position to the cell's right edge, as count and "+" step aside.
   const row = title.parentElement;
   if (row?.classList.contains("task-title-row")) {
     row.classList.add("is-renaming");
   }
 
-  // 高度跟着内容走：先归零再读 scrollHeight，换行多一行就长一行。
+  // Height follows content: reset to zero, read scrollHeight, and grow one line per extra line.
   const autosize = (): void => {
     input.style.height = "0px";
     input.style.height = `${input.scrollHeight + 2}px`;
@@ -2297,15 +2463,15 @@ function beginRename(title: HTMLSpanElement, task: Task): void {
   input.select();
   autosize();
 
-  // 回车与失焦可能先后发生，只认第一个结果。
+  // Enter and blur may both fire; accept only the first result.
   let settled = false;
   const finish = (commit: boolean): void => {
     if (settled) return;
     settled = true;
 
-    // 粘贴进来的换行折成空格：标题只做视觉换行，不把换行符写进库。
+    // Fold pasted newlines into spaces: titles wrap visually only; newline characters are never written to the DB.
     const next = input.value.replace(/\s*\n+\s*/g, " ").trim();
-    // 空值或没改：还原原文，不入库（后端也会拒，但没必要发这一趟）。
+    // Empty or unchanged: restore the original without writing (the backend would reject it too, so no need for the round trip).
     if (!commit || next === "" || next === task.title) {
       render();
       return;
@@ -2323,8 +2489,8 @@ function beginRename(title: HTMLSpanElement, task: Task): void {
     }
   });
 
-  // 点别处也算改完：在表格里换焦点是最常见的"我好了"的动作，
-  // 这里丢掉刚打的字比多存一次更糟。Esc 仍是唯一的"不要了"。
+  // Clicking elsewhere also counts as done: moving focus in the table is the usual "I'm done" action,
+  // and losing what was just typed is worse than saving once too often. Esc remains the only "never mind".
   input.addEventListener("blur", () => finish(true));
 }
 
@@ -2334,15 +2500,15 @@ async function commitRename(task: Task, title: string): Promise<void> {
     await reload();
   } catch (error) {
     showNotice(describe(error), "error");
-    render(); // 失败也要把输入框收回去，不能停在一半的状态
+    render(); // retract the input even on failure; never stop halfway
   }
 }
 
 /**
- * 改完优先级 / 移动完成后，让跳走的父任务和跟着走的子任务行一起闪一下。
+ * After a priority change / move, flash the moved parent and its accompanying subtask rows together.
  *
- * `long` 用于父任务改优先级：整棵树连同子任务会一起换位置，1 秒太快，
- * 改成静态高亮 2 秒才跟得上。
+ * `long` is for a parent priority change: the whole tree, subtasks included, moves at once; 1 second is too quick,
+ * so a static highlight for 2 seconds is easier to follow.
  */
 function flashTaskTree(taskId: number, long = false): void {
   const ids = [
@@ -2355,17 +2521,17 @@ function flashTaskTree(taskId: number, long = false): void {
     row.classList.add("just-moved");
     if (long) {
       row.classList.add("just-moved-long");
-      // 静态高亮不会自己淡出，到点把 class 摘掉；行若已被重画则这段是空操作。
+      // A static highlight does not fade on its own, so remove the class on a timer; a no-op if the row was already redrawn.
       window.setTimeout(() => row.classList.remove("just-moved-long"), 2000);
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// 确认框 / 输入框（同一个 modal）
+// Confirm / text-input dialogs (one shared modal)
 // ---------------------------------------------------------------------------
 
-/** 每次弹窗前先把上一回的形态抹干净：确认框与输入框共用这一个 modal。 */
+/** Wipe the previous shape before every dialog: confirm and text-input share this one modal. */
 function resetModal(): void {
   dom.modalBody.hidden = false;
   dom.modalBody.textContent = "";
@@ -2378,10 +2544,10 @@ function resetModal(): void {
 }
 
 /**
- * 当前打开的弹窗的“取消”入口。
+ * The "cancel" entry of the currently open dialog.
  *
- * 同一个 modal 只允许有一个主人：新弹窗会先把旧弹窗按取消收场，
- * 否则两个 `await` 会同时悬着、抢同一批 DOM 监听，一次回车跑两个命令。
+ * One modal allows only one owner: a new dialog first dismisses the old one as canceled,
+ * otherwise two `await`s hang at once and fight over the same DOM listeners, running two commands per Enter.
  */
 let dismissActiveDialog: (() => void) | null = null;
 
@@ -2399,7 +2565,7 @@ interface ConfirmOptions {
   confirmText: string;
 }
 
-/** 「先告知影响、再确认」的通用形状。返回 Promise，调用处直接 await。 */
+/** The common "tell the impact, then confirm" shape. Returns a Promise the caller can await directly. */
 function askConfirm(options: ConfirmOptions): Promise<boolean> {
   return new Promise((resolve) => {
     beginDialog();
@@ -2439,13 +2605,13 @@ function askConfirm(options: ConfirmOptions): Promise<boolean> {
 
 interface TextOptions {
   title: string;
-  /** 输入框上方的小字，通常写"旧名字 → 新名字" */
+  /** Small text above the input, usually "old name → new name" */
   label: string;
   value: string;
   confirmText: string;
 }
 
-/** 单个文本输入的弹窗。取消返回 `null`，确认返回 trim 过的非空字符串。 */
+/** Single text-input dialog. Cancel returns `null`; confirm returns a trimmed non-empty string. */
 function askText(options: TextOptions): Promise<string | null> {
   return new Promise((resolve) => {
     beginDialog();
@@ -2471,7 +2637,7 @@ function askText(options: TextOptions): Promise<string | null> {
       resolve(result);
     };
 
-    // 空白名不关窗也不出库：关掉等于让用户以为改成了空名字
+    // A blank name neither closes the dialog nor writes to the DB: closing would imply an empty name was saved
     const submit = (): void => {
       const value = dom.modalInput.value.trim();
       if (value === "") {
@@ -2507,9 +2673,9 @@ function askText(options: TextOptions): Promise<string | null> {
 }
 
 /**
- * 多行备注弹窗。与 `askText` 的关键差异：
- * - Enter 是换行，不是提交；确认只能点按钮。
- * - 返回值**不 trim**，空串表示清空备注。
+ * Multiline note dialog. Key differences from `askText`:
+ * - Enter inserts a newline, not a submit; confirm happens only via the button.
+ * - The return value is **not trimmed**; an empty string clears the note.
  */
 function askNote(options: TextOptions): Promise<string | null> {
   return new Promise((resolve) => {
@@ -2525,7 +2691,7 @@ function askNote(options: TextOptions): Promise<string | null> {
     dom.modalTextarea.value = options.value;
     dom.modalOk.textContent = options.confirmText;
     dom.modal.hidden = false;
-    // 光标落在末尾：打开就是为了接着写。
+    // Put the caret at the end: the dialog is opened to keep writing.
     dom.modalTextarea.focus();
     dom.modalTextarea.setSelectionRange(options.value.length, options.value.length);
 
@@ -2559,7 +2725,7 @@ function askNote(options: TextOptions): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
-// 事件
+// Events
 // ---------------------------------------------------------------------------
 
 dom.taskForm.addEventListener("submit", (event) => {
@@ -2569,10 +2735,10 @@ dom.taskForm.addEventListener("submit", (event) => {
 
 async function createProjectFlow(): Promise<void> {
   const name = await askText({
-    title: "新建项目",
-    label: "项目名",
+    title: t("dialog.newProject"),
+    label: t("dialog.projectName"),
     value: "",
-    confirmText: "创建",
+    confirmText: t("common.create"),
   });
   if (name === null) return;
 
@@ -2586,16 +2752,16 @@ async function createProjectFlow(): Promise<void> {
 
 async function createModuleIn(projectId: number): Promise<void> {
   const name = await askText({
-    title: "新建模块",
-    label: "模块名",
+    title: t("dialog.newModule"),
+    label: t("dialog.moduleName"),
     value: "",
-    confirmText: "创建",
+    confirmText: t("common.create"),
   });
   if (name === null) return;
 
   try {
     await api.createModule(projectId, name);
-    // 在别的项目里建的：把视图切过去，否则看不到自己刚建的东西
+    // Created in another project: switch the view there, or the new thing will not be visible
     const project = state.projects.find((p) => p.id === projectId);
     if (project && !isCurrent(project)) {
       await selectProject(project);
@@ -2609,16 +2775,16 @@ async function createModuleIn(projectId: number): Promise<void> {
 
 async function createSubmoduleIn(moduleId: number): Promise<void> {
   const name = await askText({
-    title: "新建子模块",
-    label: "子模块名",
+    title: t("dialog.newSubmodule"),
+    label: t("dialog.submoduleName"),
     value: "",
-    confirmText: "创建",
+    confirmText: t("common.create"),
   });
   if (name === null) return;
 
   try {
     await api.createSubmodule(moduleId, name);
-    // 刚加完就看不见它，等于没加：顺手把这层展开
+    // Not seeing it right after adding is as good as not adding: expand this level too
     state.collapsedNodes.delete(moduleId);
     await reload();
   } catch (error) {
@@ -2633,8 +2799,8 @@ interface RenameTarget {
 }
 
 /**
- * 结构改名走原地编辑：把名字本身换成输入框，不弹窗、不离开左栏。
- * 双击名字与右键菜单的「重命名…」都落到这里。
+ * Structure renaming uses in-place editing: the name itself becomes an input, with no dialog and no leaving the sidebar.
+ * Double-clicking a name and the context menu's "Rename…" both land here.
  */
 function renameNode(target: RenameTarget): void {
   if (target.kind === "project") {
@@ -2674,7 +2840,7 @@ function beginScopeRename(
   );
 }
 
-/** 原地编辑的共同收尾：Enter / 失焦保存，Esc 取消；空值或没改就重绘还原。 */
+/** Shared finish for in-place editing: Enter / blur saves, Esc cancels; empty or unchanged just redraws the original. */
 function beginInlineEdit(
   input: HTMLInputElement,
   original: string,
@@ -2697,7 +2863,7 @@ function beginInlineEdit(
         await reload();
       } catch (error) {
         showNotice(describe(error), "error");
-        render(); // 失败也要把输入框收回去，不能停在改了一半的状态
+        render(); // retract the input even on failure; never stop half-edited
       }
     })();
   };
@@ -2711,24 +2877,28 @@ function beginInlineEdit(
       finish(false);
     }
   });
-  // 点别处等同于保存，和任务标题的原位改名保持一致。
+  // Clicking elsewhere is equivalent to saving, consistent with task-title in-place rename.
   input.addEventListener("blur", () => finish(true));
 
   input.focus();
   input.select();
 }
 
-/** 删除任务：先问后端会连带删掉几个子任务，再确认。 */
+/** Delete task: first ask the backend how many subtasks go with it, then confirm. */
 async function deleteTaskFlow(task: Task): Promise<void> {
   try {
     const plan = await api.planDeleteTask(task.id);
     const extra = plan.taskCount - 1;
     const body =
       extra > 0
-        ? `这个任务连同 ${extra} 个子任务会被删除，无法撤销。`
-        : "这个任务会被删除，无法撤销。";
+        ? tp("confirm.deleteTaskWithChildren", extra, { count: extra })
+        : t("confirm.deleteTaskAlone");
 
-    const confirmed = await askConfirm({ title: "删除任务？", body, confirmText: "删除" });
+    const confirmed = await askConfirm({
+      title: t("confirm.deleteTask"),
+      body,
+      confirmText: t("common.delete"),
+    });
     if (!confirmed) return;
 
     const outcome = await api.deleteTask(task.id);
@@ -2738,27 +2908,35 @@ async function deleteTaskFlow(task: Task): Promise<void> {
       subtaskDraft = "";
     }
     await reload();
-    showNotice("已删除任务");
+    showNotice(t("toast.taskDeleted"));
     for (const notice of outcome.notices) showNotice(notice);
   } catch (error) {
     showNotice(describe(error), "error");
   }
 }
 
-/** 删除模块 / 子模块：组内任务一并删除，条数含子模块里的任务。 */
+/** Delete module / submodule: tasks inside are deleted too, and the count includes tasks in submodules. */
 async function deleteNodeFlow(kind: NodeKind, id: number, label: string): Promise<void> {
-  const noun = kind === "module" ? "模块" : "子模块";
+  const noun = kind === "module" ? t("scope.module") : t("scope.submodule");
   try {
     const plan = await api.planDeleteNode(kind, id);
     const body =
       plan.taskCount > 0
-        ? `${noun}「${label}」和其中的 ${plan.taskCount} 个任务会被删除，无法撤销。`
-        : `${noun}「${label}」会被删除，无法撤销。`;
+        ? tp("confirm.deleteNodeWithTasks", plan.taskCount, {
+            noun,
+            label,
+            count: plan.taskCount,
+          })
+        : t("confirm.deleteNode", { noun, label });
 
-    const confirmed = await askConfirm({ title: `删除${noun}？`, body, confirmText: "删除" });
+    const confirmed = await askConfirm({
+      title: t(kind === "module" ? "confirm.deleteModule" : "confirm.deleteSubmodule"),
+      body,
+      confirmText: t("common.delete"),
+    });
     if (!confirmed) return;
 
-    // 正停在被删的子树里，就把范围收回「全部」——不能停在一个已经不存在的地方。
+    // If the scope sits inside the deleted subtree, pull it back to "All" — never stay somewhere that no longer exists.
     const scopeWasInside = scopeInsideNode(kind, id);
     const submoduleIds =
       kind === "module" ? (state.modules.find((m) => m.id === id)?.submodules ?? []) : [];
@@ -2768,7 +2946,7 @@ async function deleteNodeFlow(kind: NodeKind, id: number, label: string): Promis
     if (scopeWasInside) state.scope = { kind: "project" };
 
     await reload();
-    showNotice(`已删除${noun}「${label}」`);
+    showNotice(t("toast.nodeDeleted", { noun, label }));
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -2788,19 +2966,27 @@ function scopeInsideNode(kind: NodeKind, id: number): boolean {
   return false;
 }
 
-/** 删除项目：项目里的任务一并删除；正停在这个项目就回落到「我的待办」。 */
+/** Delete project: tasks inside are deleted too; if currently in this project, fall back to "My tasks". */
 async function deleteProjectFlow(project: Project): Promise<void> {
   if (project.id === null) return;
   const id = project.id;
 
   try {
     const plan = await api.planDeleteProject(id);
+    const name = projectName(project);
     const body =
       plan.taskCount > 0
-        ? `项目「${project.name}」和其中的 ${plan.taskCount} 个任务会被删除，无法撤销。`
-        : `项目「${project.name}」会被删除，无法撤销。`;
+        ? tp("confirm.deleteProjectWithTasks", plan.taskCount, {
+            name,
+            count: plan.taskCount,
+          })
+        : t("confirm.deleteProjectOnly", { name });
 
-    const confirmed = await askConfirm({ title: "删除项目？", body, confirmText: "删除" });
+    const confirmed = await askConfirm({
+      title: t("confirm.deleteProject"),
+      body,
+      confirmText: t("common.delete"),
+    });
     if (!confirmed) return;
 
     const wasHere = state.container.kind === "project" && state.container.id === id;
@@ -2819,29 +3005,29 @@ async function deleteProjectFlow(project: Project): Promise<void> {
       try {
         localStorage.removeItem(PROJECT_STORAGE_KEY);
       } catch {
-        // 忽略：存储不可用不影响删除本身。
+        // Ignore: unavailable storage does not affect the deletion itself.
       }
     }
 
     await reload();
-    showNotice(`已删除项目「${project.name}」`);
+    showNotice(t("toast.projectDeleted", { name: projectName(project) }));
   } catch (error) {
     showNotice(describe(error), "error");
   }
 }
 
-/** 仅开发版：删除活库并重建。正式版没有按钮，后端也不注册命令。 */
+/** Dev builds only: delete the live DB and rebuild. Release builds have no button and register no command. */
 async function resetDatabaseFlow(): Promise<void> {
   const confirmed = await askConfirm({
-    title: "重置数据库？",
-    body: "当前数据库文件与全部数据会被删除，随后建一个空库。此操作仅开发版本可用，无法撤销。",
-    confirmText: "删除并重建",
+    title: t("confirm.resetDatabase"),
+    body: t("confirm.resetDatabaseBody"),
+    confirmText: t("confirm.deleteAndRebuild"),
   });
   if (!confirmed) return;
 
   try {
     await api.resetDatabase();
-    // 库已经换了一份：视图回到「我的待办」，旧的分组/折叠键全部失效。
+    // The database has been replaced: return the view to "My tasks"; old group/collapse keys are all invalid.
     state.container = { kind: "todo" };
     state.projectId = null;
     state.scope = { kind: "project" };
@@ -2853,11 +3039,11 @@ async function resetDatabaseFlow(): Promise<void> {
     try {
       localStorage.removeItem(PROJECT_STORAGE_KEY);
     } catch {
-      // 忽略：重置数据库不依赖本地偏好清理成功。
+      // Ignore: resetting the database does not depend on clearing local preferences.
     }
     closeMenu();
     await reload();
-    showNotice("数据库已重置");
+    showNotice(t("toast.databaseReset"));
   } catch (error) {
     showNotice(describe(error), "error");
   }
@@ -2867,7 +3053,7 @@ async function createTask(): Promise<void> {
   const title = dom.taskInput.value.trim();
   if (!title) return;
   try {
-    // 新任务跟着当前范围走：选模块就进模块，选子模块就进子模块。
+    // A new task follows the current scope: a selected module goes into that module, a submodule into that submodule.
     const target = resolveTarget(buildGroups(state.tasks, state.modules), state.scope);
     const created = await api.createTask(state.container, target, title);
     dom.taskInput.value = "";
@@ -2879,7 +3065,7 @@ async function createTask(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// 轻提示
+// Toasts
 // ---------------------------------------------------------------------------
 
 interface NoticeItem {
@@ -2892,13 +3078,16 @@ let noticeActive = false;
 let noticeTimer: number | undefined;
 
 /**
- * 底部一条会自己消失的提示，不阻塞任何操作。
+ * A self-dismissing toast at the bottom that blocks nothing.
  *
- * 多条提示按 FIFO 排队，一次只显示一条——auto 级联可能一次带回好几条，
- * 直接覆盖会让前一条永远看不见。
+ * Multiple notices queue FIFO and show one at a time — an auto cascade may return several at once,
+ * and overwriting them directly would make the earlier one invisible forever.
  */
-function showNotice(message: string, kind: "info" | "error" = "info"): void {
-  noticeQueue.push({ message, kind });
+function showNotice(message: string | BackendMessage, kind: "info" | "error" = "info"): void {
+  noticeQueue.push({
+    message: typeof message === "string" ? message : translateBackendMessage(message),
+    kind,
+  });
   if (!noticeActive) drainNotices();
 }
 
@@ -2925,19 +3114,12 @@ function drainNotices(): void {
   );
 }
 
-/** 命令失败时 Tauri 抛的是后端那个 `String`，这里只负责把它变成一句话。 */
-function describe(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
-  return String(error);
-}
-
 // ---------------------------------------------------------------------------
-// 启动
+// Startup
 // ---------------------------------------------------------------------------
 
-// 模块脚本通常早于 DOMContentLoaded 执行，但如果它被一个带 await 的入口 import，
-// 事件可能已经闪过去了。两种时机都要能起来。
+// Module scripts usually run before DOMContentLoaded, but if imported through an entry with await,
+// the event may already have passed. Boot must work in both cases.
 if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", boot);
 } else {
@@ -2945,47 +3127,74 @@ if (document.readyState === "loading") {
 }
 
 /**
- * 数据库起不来时的独立页面：只显示后端给的原因与备份路径，不碰任何命令。
- * 后端在 setup 里把主窗口换成 `index.html?startupError=...`，这里直接接管。
+ * Standalone page when the database cannot open: show only the backend's reason and backup path, touching no commands.
+ * The backend points the main window at `index.html?startupError=...` during setup; take over directly here.
  */
-function renderStartupError(message: string): void {
-  document.title = "无法启动 — Knot";
+interface StartupFailureView {
+  error?: BackendMessage;
+  detail?: string;
+  backupPath?: string | null;
+}
+
+/** The backend sends JSON; fall back to raw text for hand-written URLs. */
+function parseStartupFailure(raw: string): StartupFailureView {
+  try {
+    const parsed = JSON.parse(raw) as { error?: unknown; backupPath?: unknown };
+    if (parsed && typeof parsed === "object" && typeof parsed.error === "object") {
+      const error = parsed.error as BackendMessage;
+      if (typeof error.key === "string") {
+        return {
+          error,
+          backupPath: typeof parsed.backupPath === "string" ? parsed.backupPath : null,
+        };
+      }
+    }
+  } catch {
+    // Not JSON: show the text as-is.
+  }
+  return { detail: raw };
+}
+
+function renderStartupError(raw: string): void {
+  document.title = t("startup.documentTitle");
   document.body.classList.add("startup-error-body");
 
-  const panel = el("main", "startup-error");
+  const failure = parseStartupFailure(raw);
+  const detail = failure.error ? translateBackendMessage(failure.error) : (failure.detail ?? raw);
   const card = el("section", "startup-error-card");
   card.append(
-    el("h1", "startup-error-title", "无法启动"),
-    el(
-      "p",
-      "startup-error-lead",
-      "数据库迁移没有完成。程序没有继续加载，数据库文件没有被部分改写。",
-    ),
-    el("pre", "startup-error-detail", message),
-    el(
-      "p",
-      "startup-error-hint",
-      "按照上面的原因处理后再打开应用。需要恢复时，用上面列出的备份文件覆盖 tasks.sqlite。",
-    ),
+    el("h1", "startup-error-title", t("startup.title")),
+    el("p", "startup-error-lead", t("startup.lead")),
+    el("pre", "startup-error-detail", detail),
   );
+  if (failure.backupPath) {
+    card.append(
+      el("p", "startup-error-hint", t("startup.backup", { path: failure.backupPath })),
+    );
+  }
+  card.append(el("p", "startup-error-hint", t("startup.hint")));
+
+  const panel = el("main", "startup-error");
   panel.append(card);
   document.body.replaceChildren(panel);
 }
 
 function boot(): void {
+  initLanguage();
   const startupError = new URLSearchParams(location.search).get(STARTUP_ERROR_PARAM);
   if (startupError) {
     renderStartupError(startupError);
     return;
   }
-  // 原生右键菜单在应用里没有用处；项目与范围节点会各自 preventDefault
-  // 并打开自己的菜单，这里统一兜底禁用其余位置的浏览器菜单。
+  applyStaticTranslations();
+  // The native context menu is useless in the app; project and scope nodes each preventDefault
+  // and open their own menus, so this globally disables the browser menu everywhere else.
   document.addEventListener("contextmenu", (event) => {
     event.preventDefault();
   });
   initTheme();
   void initWindowControls();
-  // 拖拽区会先被 Tauri 的拖动逻辑拦截，菜单的全局 mousedown 收不到；这里用捕获阶段先收起。
+  // Tauri's drag logic intercepts the drag region first, so the menu's global mousedown never fires; close it in the capture phase instead.
   dom.titlebarDrag.addEventListener("mousedown", () => closeMenu(), true);
   dom.projectBtn.addEventListener("click", openProjectMenu);
   dom.aboutBtn.addEventListener("click", openAboutDialog);

@@ -27,7 +27,8 @@ reset_database   // 仅 dev build 注册；release 不注册、前端不显示�
 **一层子任务**（父行「＋」行内连续添加、缩进 4 个空格、默认展开可折叠）、
 **父子状态聚合**（三处事件触发、级联确认、轻提示 FIFO 排队）、
 **状态 / 优先级筛选**（默认隐藏已完成、父子任务独立命中、未命中父任务灰显为上下文、全量计数）、
-**数据安全**（迁移前自动备份保留 5 份、迁移失败错误窗口给原因与备份路径、开发版删库重建）。
+**数据安全**（迁移前自动备份保留 5 份、迁移失败错误窗口给原因与备份路径、开发版删库重建）、
+**中英国际化**（状态栏三态语言切换、类型安全字典、后端结构化消息、日期本地化、安装器语言选择）。
 
 **规格里有、代码里没有**
 
@@ -79,6 +80,16 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 ### D5 · 右键不可发现（未确认，建议的补救）
 
 右键菜单没有任何视觉提示，第一次用的人不会知道能右键；纯键盘用户也不友好。建议：同一菜单同时挂在**鼠标悬停时出现的 `⋯` 按钮**上（一个菜单组件、两个触发器），成本很小。**尚未确认。**
+
+### D6 · 国际化 —— **已定：中英双语 + 后端结构化消息**
+
+- 语言入口：状态栏「中文 / English / 跟随系统」三态，默认跟随系统，存 `knot.language.v1`；不新增数据库设置表。
+- 文案归属：前端字典 `src/i18n/**`；后端所有 `Err`、`plan_set_status.reason`、`notices` 改为 `Message { key, params }`，由前端翻译；契约文件 `src-tauri/backend-keys.json`。
+- 英文术语：Todo / Doing / Done、High / Medium / Low、Default、My Tasks；稳定 token（`todo/doing/done`、`high/mid/low`）与 `data-*` 不翻译。
+- 日期：显示层本地化，存储与排序继续用 `YYYY-MM-DDTHH:MM`。
+- 注释：源码注释英文化；已发布迁移只改注释、SQL 一字不动（CLAUDE.md 的表述同步放宽）。
+- 文档：中文为权威版本，英文镜像与中文相邻；术语表在 `docs/i18n/glossary.md`。
+- 安装包：NSIS 简中 + 英文并显示语言选择器；MSI 的 `zh-CN` 需实测，失败则退回英文或只发布 NSIS。
 
 ---
 
@@ -160,13 +171,13 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 - `PRAGMA foreign_key_check` 移进迁移事务、提交之前；失败连 `user_version` 一起回滚，下次启动仍会拒绝。
 - 错误窗口用 `WebviewUrl::App("index.html?startupError=…")` 独立创建，不依赖 setup 阶段 `window.url()` 的时序；原因只取 SQLite 报错的第一行，备份路径放在最前面，两者都无需滚动即可看见。
 - 删库重建不重启进程：持锁换出连接 → 删主文件与边车 → 重新打开并迁移 → 放回；保留 `.bak-*` 备份，主文件删不掉时原库接回。
-- 新增单测覆盖备份生成/保留 5 份/失败带路径/重置重建/FK 校验回滚；全部 88 个后端测试通过。
+- 新增单测覆盖备份生成/保留 5 份/失败带路径/重置重建/FK 校验回滚；国际化后全部 113 个后端测试通过。
 
 ### 阶段 7 · 工程化
 
 | # | 任务 | 改动位置 | 验收 | 依赖 |
 | --- | --- | --- | --- | --- |
-| ~~T20~~ | ✅ **前端纯函数单测**（已完成） | 引入 vitest 5；`src/grouping.test.ts` 覆盖 `grouping.ts` 的 `sortTasks` / `buildGroups` / `selectScope` / `resolveTarget` / `countGroup`（另含筛选函数） | `npm test` 绿（14 条）；`resolveTarget` 的子模块用例会守住“必须同时给出 moduleId”，故意改坏实现时该用例变红 | — |
+| ~~T20~~ | ✅ **前端纯函数单测**（已完成） | 引入 vitest 5；`src/grouping.test.ts` 覆盖 `grouping.ts` 的 `sortTasks` / `buildGroups` / `selectScope` / `resolveTarget` / `countGroup`（另含筛选函数） | `npm test` 绿（国际化后 30 条）；`resolveTarget` 的子模块用例会守住“必须同时给出 moduleId”，故意改坏实现时该用例变红 | — |
 | ~~T21~~ | ✅ **release 构建实跑**（已完成；安装包按归档约定跳过） | `npx tauri build --no-bundle`（无 bundler）；release exe | 启动 release exe 一次：CDP 创建项目/模块/任务后删除模块，`plan.taskCount=1`，库中 `tasks_in_module=0`、`total_tasks=0`、`foreign_key_check=[]`、`user_version=3`；库路径 `%APPDATA%\knot\tasks.sqlite`。系统无 WiX/NSIS，项目已归档，不再下载 bundler | T17 |
 | T22 | （可选）CI | GitHub Actions：`cargo test` + `tsc` + `vitest` | 每个 PR 自动跑 | T20 |
 
@@ -176,7 +187,7 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 - 测试数据用工厂函数直接造 `Task` / `Module`；`resolveTarget` 的子模块用例同时断言 `moduleId` 与 `submoduleId`，作为“实现退化成只给 submoduleId 就会红”的守门用例。
 - 测试文件放在 `src/` 下，因此 `tsc --noEmit` 也会检查它；`vite build` 不会把测试打进产物。
 - T21 只用系统已有能力：本机没有 WiX/NSIS，项目已归档，不再下载 bundler；改用 `npx tauri build --no-bundle` 验证 release exe 与库/FK 行为，安装包部分跳过。
-- 界面用词统一为「我的待办」「默认」：前者是虚拟容器的显示名（`TODO_NAME`），后者是模块归属为空的派生分组；源码、错误文案、文档与测试一起改，避免两个名字各说各的。
+- 界面用词统一为「我的待办」「默认」：前者是虚拟容器的显示名（国际化前由后端 `TODO_NAME` 提供，现改为前端按 `isTodo` 翻译），后者是模块归属为空的派生分组；源码、错误文案、文档与测试一起改，避免两个名字各说各的。
 - 状态筛选 chip 去掉圆形伪元素，任务优先级列与浮窗也去掉圆点：文字与颜色已经足够表达，重复的圆点让筛选行显得拥挤；行首状态按钮保留，否则状态无法修改。
 - 原生右键菜单在应用内全局禁用，只让左栏项目/范围节点的自定义菜单接管 `contextmenu`；表格与空白处不再弹出浏览器的“另存为/检查”等无关项。
 
@@ -317,6 +328,28 @@ goal 规定状态标签**默认只勾「未完成」「进行中」**，也就�
 - 落点等于当前位置（含“紧接自己之后”）时不画指示线、不写库；拖完用一次性捕获阶段的 click 监听吞掉浏览器补发的那一下，避免顺手切换范围或折叠。
 - 命令只报“插到谁前面”（`before_id`，`null` = 末尾），排序号由 `domain.rs` 统一重写成 `0..n-1`；拖到自己前面视为没动。前端不保存任何顺序状态，顺序的唯一真相是库里的 `module.sort_order`，`list_modules` 与 `buildGroups` 都按它来。
 - 验证：后端新增 `moves_modules_within_project` / `move_module_rejects_foreign_target`；mockIPC + 无头 Edge 用真实指针事件拖了“移到最后 / 拖回最前 / 原地小幅拖动”三种，确认命令参数（`beforeId`）、左栏与表格分组顺序、以及选中范围没有被动过。
+
+### 阶段 15 · 中英国际化 — 已完成
+
+| # | 任务 | 改动位置 | 验收 | 依赖 |
+| --- | --- | --- | --- | --- |
+| ~~T43~~ | ✅ **i18n 基础设施与语言三态**（已完成） | 新增 `src/i18n/index.ts` / `messages.zh.ts` / `messages.en.ts` / `static.ts` / `date.ts`；`index.html` 改 `data-i18n*` 骨架；状态栏语言按钮与三态菜单 | 语言菜单可切换；`<html lang>` 正确；静态文案双语且首帧不闪错误语言；`tsc` / `vitest` 绿 | — |
+| ~~T44~~ | ✅ **前端文案全量迁移**（已完成） | `main.ts` 常量表改 token → key；`grouping.ts` 的 `Group.label` 允许 `null`，`scopeLabel` 移到 UI 层；tooltip / aria / toast / 空状态 / 关于 / 启动错误页全部走 `t()`；列宽与菜单宽度适配英文 | 英文模式除用户数据外无中文；中英日期正确；1280×720 与 720×480 截图无表头/时间/状态栏截断 | T43 |
+| ~~T45~~ | ✅ **后端结构化消息**（已完成） | 新增 `message.rs` 与 `backend-keys.json`；`domain.rs` / `commands.rs` 的 `Err`、`reason`、`notices` 全部改 `Message`；删除 `TODO_NAME`，虚拟待办 `name` 返回空串；`api.ts` / `describe` / `showNotice` 接线 | `cargo test` 绿；Rust catalog 与前端两张表一致；中英错误 toast、确认理由正常 | T43 |
+| ~~T46~~ | ✅ **启动 / 迁移错误本地化**（已完成） | `db.rs` / `migrations.rs` 改 `Message`；`StartupFailure { error, backupPath }`；`lib.rs` 序列化 JSON 走 query，窗口标题中性 `Knot`；前端错误页解析 JSON 并本地化 | 迁移失败测试断言 key；双语错误页；备份路径独立显示；纯文本旧参数仍可显示 | T45 |
+| ~~T47~~ | ✅ **安装包与元数据**（已完成；打包工具按归档约定跳过） | `tauri.conf.json`：NSIS `["English","SimpChinese"]` + 语言选择器、WiX `["en-US","zh-CN"]`、publisher / copyright / 描述；`Cargo.toml` 描述与作者 | `tauri build --no-bundle` 解析配置通过；有 NSIS 工具链时安装器显示语言选择器；本机无 WiX/NSIS，打包本身沿用 T21 的跳过约定 | T45 |
+| ~~T48~~ | ✅ **注释、文档与门禁**（已完成） | 源码注释英文化（迁移只改注释）；新增 `README.en.md`、`docs/specs/*.en.md`、`docs/ROADMAP.en.md`、`CLAUDE.en.md`、`docs/i18n/glossary.md`；更新中文 specs / README / CLAUDE | 注释扫描无残留中文；中英文档互链；全部质量门禁通过 | T44–T47 |
+
+阶段 15 实现决策：
+
+- 不引入 i18n 库：中文字典是 key 的唯一真相，英文用 `satisfies Record<MessageKey, string>` 强制覆盖；`i18n.test.ts` 再校验 key 集合、占位符与 `index.html` 的 `data-i18n*`。
+- 后端不接收语言参数：`Message` 只带稳定 key 与参数，`db.*` / `startup.*` 的技术细节（SQLite 报错、路径）作为参数原样嵌入，前端负责外层句子的语言。
+- `Message.params` 支持字符串、数字与嵌套消息；嵌套让“重新打开数据库也失败：{内层错误}”仍能一次本地化。
+- `plan_set_status.reason` 从空串改为 `null`；前端只按 `needs_confirm` 决定弹窗，不再依赖字符串是否为空。
+- 启动错误窗口标题保持 `Knot`（建窗时读不到 localStorage），正文与 `document.title` 使用当前语言；没有为标题额外增加 `setTitle` 权限。
+- 语言切换清空列宽缓存，用新语言下的 `COLUMN_MIN` 重新夹紧旧宽度；默认时间列按英文 `Nov 4, 2026, 9:00 AM` 的实测宽度定为 176px，任务列最小 100px。
+- 迁移文件只翻译注释，SQL 与已发布结构一个字不动；CLAUDE.md 的规矩改为“SQL 结构与逻辑不可改，注释可翻译”。
+- 注释英文化时保留测试夹具里的中文数据（项目/模块/任务名），它们用于验证 Unicode 与真实输入；测试描述与断言消息改为英文。
 
 ---
 

@@ -1,13 +1,13 @@
 [package]
 name = "knot"
 version = "0.1.1"
-description = "开发任务的结构化清单"
-authors = ["you"]
+description = "A local-first desktop task manager for developer work"
+authors = ["Whenyd"]
 edition = "2024"
 
 [lib]
-# `_lib` 后缀是为了让 lib 名与 bin 名不冲突（Windows 上会撞名，
-# 见 https://github.com/rust-lang/cargo/issues/8519）。
+# The `_lib` suffix keeps the library name from colliding with the binary name
+# on Windows; see https://github.com/rust-lang/cargo/issues/8519.
 name = "knot_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
@@ -17,14 +17,13 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
-# `bundled` 把 SQLite 源码编进二进制：不再依赖系统里有没有 sqlite3.dll，
-# 安装包也因此自带确定的 SQLite 版本。
+# `bundled` compiles SQLite into the binary: no dependency on a system
+# sqlite3.dll, and the installer ships a known SQLite version.
 rusqlite = { version = "0.41", features = ["bundled"] }
-# 只在 `domain.rs` 里取一次本地时间（状态变化时自动记开始 / 结束）。
+# Used only in `domain.rs` to read the local time (start/end timestamps on status changes).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-
-[dev-dependencies]
-# 只用于验证 IPC 上的字段名契约（camelCase / 枚举值），不进发布二进制。
+# Startup failures are passed to the error window as JSON; tests also use it
+# to verify the IPC wire shape.
 serde_json = "1"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

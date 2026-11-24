@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <script>
-      // 先定主题再加载样式，避免首屏先闪一下浅色（CSP 为 null，允许内联）。
+      // Set the theme before styles load so the first paint never flashes light (CSP is null, inline allowed).
       (() => {
         try {
           const stored = localStorage.getItem("knot.theme.v1");
@@ -16,6 +16,23 @@
           document.documentElement.dataset.theme = "light";
         }
       })();
+
+      // Resolve the language before the first paint; the module repeats this
+      // and owns all visible text.
+      (() => {
+        try {
+          const stored = localStorage.getItem("knot.language.v1");
+          const mode =
+            stored === "zh" || stored === "en" || stored === "system" ? stored : "system";
+          const tag = (navigator.language ?? "").toLowerCase();
+          const language = mode === "system" ? (tag.startsWith("zh") ? "zh" : "en") : mode;
+          document.documentElement.lang = language === "zh" ? "zh-CN" : "en-US";
+          document.documentElement.dataset.language = language;
+        } catch {
+          document.documentElement.lang = "zh-CN";
+          document.documentElement.dataset.language = "zh";
+        }
+      })();
     </script>
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -24,7 +41,7 @@
   </head>
 
   <body>
-    <!-- 16px 描边图标；状态图标使用 currentColor，随主题变色。 -->
+    <!-- 16px stroked icons; status icons use currentColor so they follow the theme. -->
     <svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <symbol id="i-chevron" viewBox="0 0 16 16">
         <path
@@ -148,10 +165,20 @@
           stroke-width="1.3"
         />
       </symbol>
+      <symbol id="i-globe" viewBox="0 0 16 16">
+        <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.3" />
+        <path
+          d="M2.5 8h11M8 2.5c1.4 1.5 2.1 3.4 2.1 5.5S9.4 12 8 13.5C6.6 12 5.9 10.1 5.9 8S6.6 4 8 2.5z"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.3"
+          stroke-linecap="round"
+        />
+      </symbol>
     </svg>
 
     <div class="app">
-      <!-- 应用内顶栏：Windows 下兼作自绘标题栏；macOS 使用原生红绿灯。 -->
+      <!-- In-app top bar: doubles as a custom title bar on Windows; macOS uses native traffic lights. -->
       <header class="topbar">
         <button
           class="project-btn"
@@ -159,27 +186,49 @@
           type="button"
           aria-haspopup="menu"
           aria-expanded="false"
-          title="项目菜单"
+          data-i18n-title="nav.projectMenu"
         >
-          <span>项目</span>
+          <span data-i18n="nav.projects"></span>
           <svg class="icon project-caret" viewBox="0 0 16 16" aria-hidden="true">
             <use href="#i-chevron"></use>
           </svg>
         </button>
         <div class="titlebar-drag" id="titlebar-drag" data-tauri-drag-region></div>
-        <div class="filter-groups" id="filters" aria-label="任务筛选"></div>
+        <div
+          class="filter-groups"
+          id="filters"
+          data-i18n-aria-label="filter.tasksAria"
+        ></div>
         <div class="window-controls" id="window-controls">
-          <button class="window-btn" id="window-min" type="button" title="最小化" aria-label="最小化">
+          <button
+            class="window-btn"
+            id="window-min"
+            type="button"
+            data-i18n-title="window.minimize"
+            data-i18n-aria-label="window.minimize"
+          >
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
               <use href="#i-minimize"></use>
             </svg>
           </button>
-          <button class="window-btn" id="window-max" type="button" title="最大化" aria-label="最大化">
+          <button
+            class="window-btn"
+            id="window-max"
+            type="button"
+            data-i18n-title="window.maximize"
+            data-i18n-aria-label="window.maximize"
+          >
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
               <use href="#i-maximize"></use>
             </svg>
           </button>
-          <button class="window-btn close" id="window-close" type="button" title="关闭" aria-label="关闭">
+          <button
+            class="window-btn close"
+            id="window-close"
+            type="button"
+            data-i18n-title="window.close"
+            data-i18n-aria-label="window.close"
+          >
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
               <use href="#i-close"></use>
             </svg>
@@ -188,26 +237,26 @@
       </header>
 
       <div class="workspace">
-        <!-- 左栏：「我的待办」恒在最上；当前项目名下面是模块/子模块树。 -->
+        <!-- Sidebar: "My tasks" is always on top; the module/submodule tree sits under the current project name. -->
         <aside class="sidebar" id="sidebar">
           <nav class="side-group" id="todo-section"></nav>
 
           <div class="side-heading" id="project-heading" hidden></div>
           <nav class="side-group" id="scope-section"></nav>
 
-          <!-- 仅开发版显示；正式构建里 import.meta.env.DEV 为 false，永远保持隐藏。 -->
+          <!-- Shown in dev builds only; in release builds import.meta.env.DEV is false, so it stays hidden. -->
           <button class="side-add dev-reset" id="dev-reset" type="button" hidden>
-            重置数据库（开发）
+            <span data-i18n="dev.reset"></span>
           </button>
         </aside>
 
-        <!-- 左栏宽度把手：零宽占位，10px 的可拖区域跨在左栏边框两侧。 -->
+        <!-- Sidebar width handle: zero-width placeholder; a 10px drag area straddles the sidebar border. -->
         <div
           class="sidebar-resizer"
           id="sidebar-resizer"
           role="separator"
           aria-orientation="vertical"
-          aria-label="调整左栏宽度"
+          data-i18n-aria-label="resize.sidebar"
           tabindex="0"
         ></div>
 
@@ -215,35 +264,35 @@
           <div class="grid-scroll" id="grid-scroll">
             <table class="grid" id="grid">
               <colgroup>
-                <col data-col="status" style="width: 44px" />
+                <col data-col="status" style="width: 64px" />
                 <col data-col="title" />
-                <col data-col="priority" style="width: 76px" />
-                <col data-col="created" style="width: 140px" />
-                <col data-col="start" style="width: 140px" />
-                <col data-col="end" style="width: 140px" />
-                <col data-col="note" style="width: 160px" />
+                <col data-col="priority" style="width: 92px" />
+                <col data-col="created" style="width: 176px" />
+                <col data-col="start" style="width: 176px" />
+                <col data-col="end" style="width: 176px" />
+                <col data-col="note" style="width: 150px" />
               </colgroup>
               <thead>
                 <tr>
                   <th data-col="status">
-                    状态<span class="col-resizer" data-boundary="status:title"></span>
+                    <span data-i18n="column.status"></span><span class="col-resizer" data-boundary="status:title"></span>
                   </th>
                   <th data-col="title">
-                    任务<span class="col-resizer" data-boundary="title:priority"></span>
+                    <span data-i18n="column.title"></span><span class="col-resizer" data-boundary="title:priority"></span>
                   </th>
                   <th data-col="priority" aria-sort="none">
-                    优先级<button class="sort-btn" type="button" data-sort="priority" aria-label="按优先级排序" title="按优先级排序">⇅</button><span class="col-resizer" data-boundary="priority:created"></span>
+                    <span data-i18n="column.priority"></span><button class="sort-btn" type="button" data-sort="priority">⇅</button><span class="col-resizer" data-boundary="priority:created"></span>
                   </th>
                   <th data-col="created" aria-sort="none">
-                    创建<button class="sort-btn" type="button" data-sort="created" aria-label="按创建时间排序" title="按创建时间排序">⇅</button><span class="col-resizer" data-boundary="created:start"></span>
+                    <span data-i18n="column.created"></span><button class="sort-btn" type="button" data-sort="created">⇅</button><span class="col-resizer" data-boundary="created:start"></span>
                   </th>
                   <th data-col="start" aria-sort="none">
-                    开始<button class="sort-btn" type="button" data-sort="start" aria-label="按开始时间排序" title="按开始时间排序">⇅</button><span class="col-resizer" data-boundary="start:end"></span>
+                    <span data-i18n="column.start"></span><button class="sort-btn" type="button" data-sort="start">⇅</button><span class="col-resizer" data-boundary="start:end"></span>
                   </th>
                   <th data-col="end" aria-sort="none">
-                    结束<button class="sort-btn" type="button" data-sort="end" aria-label="按结束时间排序" title="按结束时间排序">⇅</button><span class="col-resizer" data-boundary="end:note"></span>
+                    <span data-i18n="column.end"></span><button class="sort-btn" type="button" data-sort="end">⇅</button><span class="col-resizer" data-boundary="end:note"></span>
                   </th>
-                  <th data-col="note">备注</th>
+                  <th data-col="note"><span data-i18n="column.note"></span></th>
                 </tr>
               </thead>
               <tbody id="grid-body"></tbody>
@@ -254,7 +303,7 @@
           <form class="add" id="task-form">
             <input
               id="task-input"
-              placeholder="添加任务，回车保存（优先级中）"
+              data-i18n-placeholder="task.addPlaceholder"
               autocomplete="off"
               spellcheck="false"
             />
@@ -262,24 +311,45 @@
         </main>
       </div>
 
-      <footer class="statusbar" aria-label="状态栏">
+      <footer class="statusbar" data-i18n-aria-label="statusbar.aria">
         <div class="status-right">
           <span class="status-count" id="status-count"></span>
           <span class="status-sep" aria-hidden="true"></span>
+          <button
+            class="status-btn"
+            id="language-btn"
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            data-i18n-title="language.switch"
+            data-i18n-aria-label="language.switch"
+          >
+            <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+              <use href="#i-globe"></use>
+            </svg>
+            <span id="language-label"></span>
+          </button>
           <button
             class="status-btn"
             id="theme-btn"
             type="button"
             aria-haspopup="menu"
             aria-expanded="false"
-            title="切换主题"
+            data-i18n-title="theme.switch"
+            data-i18n-aria-label="theme.switch"
           >
             <svg class="icon" id="theme-icon" viewBox="0 0 16 16" aria-hidden="true">
               <use href="#i-sun"></use>
             </svg>
-            <span id="theme-label">浅色</span>
+            <span id="theme-label" data-i18n="theme.light"></span>
           </button>
-          <button class="status-btn" id="about-btn" type="button" title="关于">关于</button>
+          <button
+            class="status-btn"
+            id="about-btn"
+            type="button"
+            data-i18n-title="about.label"
+            data-i18n="about.label"
+          ></button>
         </div>
       </footer>
     </div>
@@ -287,9 +357,9 @@
     <div class="notice" id="notice" role="status" hidden></div>
     <div class="resize-tip" id="resize-tip" hidden></div>
 
-    <!-- 确认框：
-         「先告知影响条数再确认」是全局形状，删除、级联完成都走它。
-         不用 window.confirm：那是浏览器的原生对话框，样式与键盘行为都不受控。 -->
+    <!-- Confirm dialog:
+         "tell how many rows are affected, then confirm" is the global shape, used by deletes and cascade-done.
+         Not window.confirm: that is the browser's native dialog, with uncontrolled styling and keyboard behavior. -->
     <div class="modal" id="modal" hidden>
       <div class="modal-card" id="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
         <h2 class="modal-title" id="modal-title"></h2>
@@ -300,7 +370,7 @@
           <textarea class="modal-textarea" id="modal-textarea" rows="6" hidden></textarea>
         </label>
         <div class="modal-actions">
-          <button class="btn" id="modal-cancel" type="button">取消</button>
+          <button class="btn" id="modal-cancel" type="button" data-i18n="common.cancel"></button>
           <button class="btn btn-primary" id="modal-ok" type="button"></button>
         </div>
       </div>
@@ -318,33 +388,33 @@
           </div>
         </div>
 
-        <p class="about-desc">AI时代本地优先的个人桌面待办应用</p>
+        <p class="about-desc" data-i18n="about.desc"></p>
 
         <dl class="about-rows">
           <div class="about-row">
-            <dt>版本</dt>
+            <dt data-i18n="about.version"></dt>
             <dd id="about-version-row">0.1.1</dd>
           </div>
           <div class="about-row">
-            <dt>平台</dt>
+            <dt data-i18n="about.platform"></dt>
             <dd id="about-platform">Windows · x64</dd>
           </div>
           <div class="about-row">
-            <dt>运行时</dt>
+            <dt data-i18n="about.runtime"></dt>
             <dd id="about-runtime">Tauri 2 · WebView2</dd>
           </div>
           <div class="about-row">
-            <dt>许可证</dt>
+            <dt data-i18n="about.license"></dt>
             <dd>MIT</dd>
           </div>
           <div class="about-row">
-            <dt>版权</dt>
+            <dt data-i18n="about.copyright"></dt>
             <dd>© 2026 Whenyd</dd>
           </div>
         </dl>
 
         <div class="modal-actions">
-          <button class="btn btn-primary" id="about-ok" type="button">确定</button>
+          <button class="btn btn-primary" id="about-ok" type="button" data-i18n="common.ok"></button>
         </div>
       </div>
     </div>

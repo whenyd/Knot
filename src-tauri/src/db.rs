@@ -1,7 +1,9 @@
-//! 存储层：库文件位置、连接、连接级 PRAGMA、迁移前备份。
+//! Storage layer: database file location, connection, connection-level PRAGMAs, and
+//! pre-migration backups.
 //!
-//! 只有一个入口 [`open`]，因为它顺带备份与迁移——不想让别处拿到一个
-//! "还没迁移完"的连接。规则不在这里，在 `domain.rs`。
+//! There is only one entry point, [`open`], because it also handles backup and migration—we
+//! do not want anything else to get a connection that is "not migrated yet". Rules do not
+//! live here; they live in `domain.rs`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,66 +11,95 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
+use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
+use crate::message::{Message, MessageKey};
 use crate::migrations;
 
-/// 应用数据子目录（Windows 下即 `%APPDATA%/knot`）。
+/// The reason the app could not open its database, plus the backup that was
+/// taken before the failed migration (if one was taken).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupFailure {
+    pub error: Message,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<String>,
+}
+
+impl From<Message> for StartupFailure {
+    fn from(error: Message) -> Self {
+        Self {
+            error,
+            backup_path: None,
+        }
+    }
+}
+
+/// Application data subdirectory (on Windows this is `%APPDATA%/knot`).
 pub const APP_DIR: &str = "knot";
 
-/// 库文件名。
+/// Database file name.
 pub const DB_FILE: &str = "tasks.sqlite";
 
-/// 迁移前备份保留的份数（含刚生成的那一份）。
+/// Number of pre-migration backups to keep (including the one just created).
 const BACKUP_KEEP: usize = 5;
 
-/// 交给 Tauri 托管的连接句柄。
+/// Connection handle managed by Tauri.
 ///
-/// 单连接 + `Mutex`：本应用是单窗口单用户，连接池带来的并发能力用不上，
-/// 反而多一层"事务可能在另一条连接上"的迷惑。
+/// Single connection + `Mutex`: this app is single-window and single-user, so a connection
+/// pool's concurrency buys us nothing and only adds the confusion of "the transaction might
+/// be on another connection".
 pub struct Db(Mutex<Connection>);
 
 impl Db {
-    /// 定位库文件、建立连接、跑完迁移。
-    pub fn open_in_app_data(app: &AppHandle) -> Result<Self, String> {
+    /// Locate the database file, open the connection, and run migrations.
+    pub fn open_in_app_data(app: &AppHandle) -> Result<Self, StartupFailure> {
         let path = db_path(app)?;
         let conn = open(&path)?;
         Ok(Db(Mutex::new(conn)))
     }
 
-    /// 取连接。中毒（上一个持有者 panic）时继续用：SQLite 自身状态不会因此损坏，
-    /// 而"直接失败"只会把一个已经恢复的可能性变成永久故障。
+    /// Borrow the connection. If the mutex is poisoned (a previous holder panicked), keep
+    /// using it: SQLite's own state is not corrupted by that, and failing outright would turn
+    /// a recoverable situation into a permanent fault.
     pub fn conn(&self) -> MutexGuard<'_, Connection> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 开发期删库重建：关文件连接 → 删库 → 重新建库并跑迁移。
+    /// Debug-time database reset: close the file connection → delete the database →
+    /// recreate it and run migrations.
     ///
-    /// 整段持锁，别的命令不会看到中间那个临时的内存连接。主文件删不掉时
-    /// 把原库重新接回去，让应用还能继续用。
+    /// The lock is held throughout so other commands never see the temporary in-memory
+    /// connection in between. If the main file cannot be deleted, reconnect the original
+    /// database so the app remains usable.
     ///
-    /// 只清活库与它的边车文件；`.bak-*` 备份保留——它们正是出问题时的恢复副本。
+    /// Only the live database and its sidecar files are removed; `.bak-*` backups are
+    /// kept—they are exactly the recovery copies you need when something goes wrong.
     #[cfg(debug_assertions)]
-    pub fn reset(&self, path: &Path) -> Result<(), String> {
+    pub fn reset(&self, path: &Path) -> Result<(), Message> {
         let mut guard = self.conn();
 
-        // Windows 上必须先放掉文件句柄，否则删除会失败。
-        let placeholder =
-            Connection::open_in_memory().map_err(|e| format!("无法准备重置数据库：{e}"))?;
+        // On Windows the file handle must be released first, otherwise deletion fails.
+        let placeholder = Connection::open_in_memory().map_err(|e| {
+            Message::new(MessageKey::DbResetPrepareFailed).param("detail", e.to_string())
+        })?;
         let old = std::mem::replace(&mut *guard, placeholder);
         drop(old);
 
         match remove_database_files(path) {
             Ok(()) => {
-                *guard = open(path)?;
+                *guard = open(path).map_err(|failure| failure.error)?;
                 Ok(())
             }
             Err(error) => {
-                // 原库还在：重新接上，别让应用停在临时连接上。
+                // The original database is still there: reconnect so the app does not
+                // get stuck on the temporary connection.
                 match open(path) {
                     Ok(conn) => *guard = conn,
                     Err(reopen) => {
-                        return Err(format!("{error}；重新打开数据库也失败：{reopen}"));
+                        return Err(Message::new(MessageKey::DbReopenFailed)
+                            .param("detail", reopen.error));
                     }
                 }
                 Err(error)
@@ -77,60 +108,72 @@ impl Db {
     }
 }
 
-/// `%APPDATA%/knot/tasks.sqlite`，目录不存在就建。
-pub fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let base = app
-        .path()
-        .data_dir()
-        .map_err(|e| format!("无法定位应用数据目录：{e}"))?;
+/// `%APPDATA%/knot/tasks.sqlite`, creating the directory if it does not exist.
+pub fn db_path(app: &AppHandle) -> Result<PathBuf, Message> {
+    let base = app.path().data_dir().map_err(|e| {
+        Message::new(MessageKey::DbDataDirFailed).param("detail", e.to_string())
+    })?;
     let dir = base.join(APP_DIR);
-    fs::create_dir_all(&dir).map_err(|e| format!("无法创建目录 {}：{e}", dir.display()))?;
+    fs::create_dir_all(&dir).map_err(|e| {
+        Message::new(MessageKey::DbCreateDirFailed)
+            .param("path", dir.display().to_string())
+            .param("detail", e.to_string())
+    })?;
     Ok(dir.join(DB_FILE))
 }
 
-/// 打开连接 → 外键 ON → 迁移前备份（仅旧库升级）→ 迁移。
-pub fn open(path: &Path) -> Result<Connection, String> {
-    let mut conn =
-        Connection::open(path).map_err(|e| format!("无法打开数据库 {}：{e}", path.display()))?;
+/// Open connection → foreign keys ON → pre-migration backup (only when upgrading an old
+/// database) → migrate.
+pub fn open(path: &Path) -> Result<Connection, StartupFailure> {
+    let mut conn = Connection::open(path).map_err(|e| {
+        Message::new(MessageKey::DbOpenFailed)
+            .param("path", path.display().to_string())
+            .param("detail", e.to_string())
+    })?;
 
-    // SQLite 默认关闭外键，每个连接都要显式打开，否则 ON DELETE 级联静默失效。
+    // SQLite disables foreign keys by default; every connection must enable them
+    // explicitly, or ON DELETE cascades silently do nothing.
     conn.pragma_update(None, "foreign_keys", true)
-        .map_err(|e| format!("无法开启外键约束：{e}"))?;
+        .map_err(|e| {
+            Message::new(MessageKey::DbForeignKeysFailed).param("detail", e.to_string())
+        })?;
 
     let current = migrations::current_version(&conn)?;
     let target = migrations::target_version();
 
-    // 新库（0）没有数据可保护；同版本或更高版本也不会写，所以都不备份。
+    // A fresh database (0) has no data to protect; the same or a newer version will not be
+    // written, so neither is backed up.
     let backup = if 0 < current && current < target {
         Some(backup_before_migration(path, current)?)
     } else {
         None
     };
 
-    // 备份路径放在最前面：它是用户最需要的恢复信息，不该被长错误挤到滚动区底部。
-    migrations::migrate(&mut conn).map_err(|error| match &backup {
-        Some(backup) => format!("迁移前的备份：{}\n\n{error}", backup.display()),
-        None => error,
+    migrations::migrate(&mut conn).map_err(|error| StartupFailure {
+        error,
+        backup_path: backup.map(|path| path.display().to_string()),
     })?;
 
     Ok(conn)
 }
 
-/// 把迁移前的库复制成 `tasks.sqlite.bak-v<旧版本>-<时间戳>`。
+/// Copy the pre-migration database to `tasks.sqlite.bak-v<old version>-<timestamp>`.
 ///
-/// 此刻连接空闲、没有事务，库用的是默认 rollback journal，文件本身就是
-/// 一致快照，直接复制即可。备份失败就不迁移——这是本阶段的安全底线。
-fn backup_before_migration(path: &Path, from_version: i64) -> Result<PathBuf, String> {
+/// The connection is idle and there is no transaction at this point, and the database uses
+/// the default rollback journal, so the file itself is a consistent snapshot and can be
+/// copied directly. If the backup fails, skip migration—this is the safety floor for this
+/// phase.
+fn backup_before_migration(path: &Path, from_version: i64) -> Result<PathBuf, Message> {
     let target = backup_path(path, from_version);
 
     if let Err(error) = fs::copy(path, &target) {
-        // 半截的备份比没有备份更危险：清掉再报错。
+        // A half-written backup is more dangerous than none: remove it before reporting
+        // the error.
         let _ = fs::remove_file(&target);
-        return Err(format!(
-            "迁移前备份失败，已停止迁移：无法把 {} 复制到 {}：{error}",
-            path.display(),
-            target.display()
-        ));
+        return Err(Message::new(MessageKey::DbBackupCopyFailed)
+            .param("from", path.display().to_string())
+            .param("to", target.display().to_string())
+            .param("detail", error.to_string()));
     }
 
     prune_backups(path);
@@ -144,7 +187,8 @@ fn backup_path(path: &Path, from_version: i64) -> PathBuf {
         .unwrap_or_else(|| DB_FILE.to_string());
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
 
-    // 同一毫秒内连续备份（测试里会发生）也要拿到不同的名字。
+    // Consecutive backups within the same millisecond (which happens in tests) still
+    // need distinct names.
     let mut stamp = now_millis();
     loop {
         let candidate = dir.join(format!("{file_name}.bak-v{from_version}-{stamp}"));
@@ -155,7 +199,8 @@ fn backup_path(path: &Path, from_version: i64) -> PathBuf {
     }
 }
 
-/// 只清理本程序生成的 `tasks.sqlite.bak-v*`；手工备份（如 `.bak-import-*`）不碰。
+/// Only remove `tasks.sqlite.bak-v*` files created by this program; manual backups
+/// (e.g. `.bak-import-*`) are left alone.
 fn prune_backups(path: &Path) {
     let Some(dir) = path.parent() else { return };
     let Some(file_name) = path.file_name() else {
@@ -184,7 +229,8 @@ fn prune_backups(path: &Path) {
         return;
     }
 
-    // 删除失败不阻断启动：多留几份备份不会破坏数据。
+    // Deletion failures must not block startup: leaving a few extra backups cannot
+    // corrupt data.
     backups.sort_by_key(|(stamp, _)| *stamp);
     let remove_count = backups.len() - BACKUP_KEEP;
     for (_, old) in backups.into_iter().take(remove_count) {
@@ -199,16 +245,22 @@ fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
-/// 删除活库与它的边车文件。主文件的 `NotFound` 视为已经删掉了。
+/// Delete the live database and its sidecar files. A `NotFound` on the main file counts as
+/// already deleted.
 #[cfg(debug_assertions)]
-fn remove_database_files(path: &Path) -> Result<(), String> {
+fn remove_database_files(path: &Path) -> Result<(), Message> {
     match fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("无法删除数据库 {}：{error}", path.display())),
+        Err(error) => {
+            return Err(Message::new(MessageKey::DbDeleteFailed)
+                .param("path", path.display().to_string())
+                .param("detail", error.to_string()));
+        }
     }
 
-    // 边车属于同一个库；删不掉也不阻止重建，SQLite 会忽略孤立的边车。
+    // Sidecars belong to the same database; failing to delete them does not block
+    // recreation, and SQLite ignores orphaned sidecars.
     for suffix in ["-journal", "-wal", "-shm"] {
         let _ = fs::remove_file(sidecar_path(path, suffix));
     }
@@ -227,7 +279,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// 每个测试一个临时目录；连接先于目录释放（声明顺序决定 Drop 顺序）。
+    /// One temp directory per test; the connection is dropped before the directory
+    /// (declaration order determines Drop order).
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -247,12 +300,13 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            // 句柄可能还没完全释放；清理失败不影响测试结论。
+            // Handles may not be fully released yet; cleanup failures do not affect
+            // test results.
             let _ = fs::remove_dir_all(&self.0);
         }
     }
 
-    /// 建一个 v1 库并写入一条项目/任务，然后关掉连接。
+    /// Create a v1 database with one project/task, then close the connection.
     fn make_v1_db(dir: &Path) -> PathBuf {
         let path = dir.join(DB_FILE);
         let conn = Connection::open(&path).unwrap();
@@ -291,15 +345,15 @@ mod tests {
         drop(open(&path).unwrap());
 
         let found = backups(dir.path());
-        assert_eq!(found.len(), 1, "旧库升级应生成一份备份");
+        assert_eq!(found.len(), 1, "upgrading an old database should create one backup");
 
         let backup = Connection::open(&found[0]).unwrap();
         assert_eq!(migrations::current_version(&backup).unwrap(), 1);
         let projects: i64 = backup
             .query_row("SELECT COUNT(*) FROM project", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(projects, 1, "备份里应保留迁移前的数据");
-        assert!(decoy.exists(), "手工备份不能被清理");
+        assert_eq!(projects, 1, "the backup should preserve pre-migration data");
+        assert!(decoy.exists(), "manual backups must not be pruned");
     }
 
     #[test]
@@ -309,7 +363,7 @@ mod tests {
 
         drop(open(&path).unwrap());
 
-        assert!(backups(dir.path()).is_empty(), "新库没有数据可保护");
+        assert!(backups(dir.path()).is_empty(), "a fresh database has no data to protect");
     }
 
     #[test]
@@ -329,21 +383,25 @@ mod tests {
         let dir = TempDir::new("failure");
         let path = make_v1_db(dir.path());
         {
-            // 让 v2 的 CREATE TABLE task_v2 撞名，迁移必然失败。
+            // Make v2's CREATE TABLE task_v2 collide by name so migration must fail.
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch("CREATE TABLE task_v2 (x INTEGER);")
                 .unwrap();
         }
 
-        let error = open(&path).unwrap_err();
-        assert!(error.contains("迁移前的备份"), "{error}");
+        let failure = open(&path).unwrap_err();
+        assert_eq!(failure.error.key, MessageKey::StartupMigrationFailed);
+        assert!(
+            failure.backup_path.is_some(),
+            "a failed migration must report its backup"
+        );
         assert_eq!(backups(dir.path()).len(), 1);
 
         let conn = Connection::open(&path).unwrap();
         assert_eq!(
             migrations::current_version(&conn).unwrap(),
             1,
-            "失败的事务不能推进 user_version"
+            "a failed transaction must not advance user_version"
         );
     }
 
@@ -372,6 +430,31 @@ mod tests {
                 migrations::target_version()
             );
         }
-        assert!(path.exists(), "重置后应重新建出库文件");
+        assert!(path.exists(), "reset should recreate the database file");
+    }
+
+    #[test]
+    fn startup_failure_wire_shape_reports_message_and_backup() {
+        let failure = StartupFailure {
+            error: Message::new(MessageKey::StartupMigrationFailed)
+                .param("version", 3i64)
+                .param("detail", "boom"),
+            backup_path: Some("C:\\tmp\\tasks.sqlite.bak-v2-1".to_string()),
+        };
+        let json = serde_json::to_value(&failure).unwrap();
+        assert_eq!(json["error"]["key"], "startup.migrationFailed");
+        assert_eq!(json["error"]["params"]["version"], 3);
+        assert_eq!(json["error"]["params"]["detail"], "boom");
+        assert_eq!(json["backupPath"], "C:\\tmp\\tasks.sqlite.bak-v2-1");
+
+        let without_backup = StartupFailure {
+            backup_path: None,
+            ..failure
+        };
+        let json = serde_json::to_value(&without_backup).unwrap();
+        assert!(
+            json.get("backupPath").is_none(),
+            "no backup means the field is omitted"
+        );
     }
 }

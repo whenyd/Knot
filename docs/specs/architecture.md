@@ -14,18 +14,22 @@ parent: goal-and-requirements
 
 ```
 前端 (Vite + TS, 原生 DOM)
+   ├─ src/i18n/                —— 语言状态、中英字典、静态文案、日期显示
+   └─ src/api.ts               —— 唯一 invoke 层；类型与后端逐字对应
    │  只发命令、只渲染；不认识任何聚合规则
    ▼
 Tauri 命令层 (commands.rs)      —— 薄壳：参数校验、开事务、调 domain
    ▼
 领域层 (domain.rs)              —— 唯一写入口：状态联动、级联、排序号分配
    ▼
+结构化消息 (message.rs)         —— { key, params }；后端不产生用户可见自然语言
+   ▼
 存储层 (db.rs + migrations.rs)  —— rusqlite、连接、user_version 迁移
    ▼
 %APPDATA%/knot/tasks.sqlite
 ```
 
-规则只允许住在 `domain.rs`。前端不重算、SQL 触发器不重复表达——否则同一套规则会有两个实现，必然漂移。
+规则只允许住在 `domain.rs`。前端不重算、SQL 触发器不重复表达——否则同一套规则会有两个实现，必然漂移。语言规则同理：用户可见文案只住在 `src/i18n/**`，后端只决定“是哪一条消息”。
 
 ## 数据模型
 
@@ -90,12 +94,12 @@ CREATE INDEX idx_task_parent  ON task(parent_task_id);
 - **只写前进**：不写 down 迁移。down 长期没人执行，是假的安全感；回滚靠下面的备份。
 - **迁移前自动备份**：仅当 `0 < user_version < MIGRATIONS.len()`（已有数据的旧库升级）时，把库文件复制为同目录的 `tasks.sqlite.bak-v<旧版本>-<epoch 毫秒>`；新库和同版本启动不备份。备份失败即停止迁移，绝不无备份地改结构。每次备份后只保留最新 5 份，清理只认 `tasks.sqlite.bak-v*` 前缀（用户手工放的 `.bak-import-*` 不碰）。迁移失败时错误信息把**备份路径放在最前面**，再附一句原因。
 - **外键开关**：每个连接显式 `PRAGMA foreign_keys = ON`（bundled SQLite 默认也开，但代码不依赖编译选项）。迁移事务内先关（重建表时外键会挡路），`PRAGMA foreign_key_check` 在**提交之前**执行——校验失败连 `user_version` 一起回滚，下次启动还会重新失败并拒绝启动，而不是误以为迁移已完成。
-- **启动失败界面**：setup 失败不再 panic，而是隐藏主窗口、新建标题为「无法启动 — 我的待办」的错误窗口，加载 `index.html?startupError=<percent-encoded 原因>`。前端 `boot()` 在渲染任何界面、调用任何命令之前读取该参数，用独立页面原样显示原因与备份路径（`textContent`，不拼 HTML）。
+- **启动失败界面**：setup 失败不再 panic，而是隐藏主窗口、新建标题为中性的 `Knot` 错误窗口，加载 `index.html?startupError=<percent-encoded JSON>`。JSON 形状是 `StartupFailure { error: Message, backupPath?: string }`；前端 `boot()` 在渲染任何界面、调用任何命令之前读取该参数，用当前语言渲染错误页，备份路径单独成段（`textContent`，不拼 HTML）。窗口标题在 WebView 加载前创建，拿不到用户语言，所以保持中性；页面正文仍跟随 `knot.language.v1` / 系统语言。
 - **开发期重置**：仅 dev build 的 invoke 注册里包含 `reset_database`（`#[cfg(debug_assertions)]`），前端也只在 `import.meta.env.DEV` 时显示左栏底部的「重置数据库（开发）」按钮。重置整段持锁：用内存连接换出文件连接并释放句柄 → 删 `tasks.sqlite` 与 `-journal`/`-wal`/`-shm` 边车 → 重新打开、跑迁移并放回。**保留 `.bak-*` 备份**；删除主文件失败时把原库接回去并返回错误，应用继续可用。正式版不注册这条命令。
 
 ## 状态联动（父子）
 
-**聚合是事件触发的推导，不是恒成立的不变式。** 这是有意的：允许用户把父任务手动按下去，代价是可能出现“父未完成、子全完成”，直到下一次子任务变动才纠正。
+**聚合是事件触发的推导，不是恒成立的不变式。** 这是有意的：允许用户把父任务手动按下去，代价是可能出现“父未开始、子全完成”，直到下一次子任务变动才纠正。
 
 触发聚合的三个事件（都在同一个事务内完成）：
 
@@ -103,7 +107,7 @@ CREATE INDEX idx_task_parent  ON task(parent_task_id);
 2. 子任务新增
 3. 子任务删除
 
-聚合动作：子任务全为 `done` → 父置 `done`；否则只要有子任务为 `doing` 或 `done` → 父置 `doing`；子任务全为 `todo` → 父置 `todo`。规则按字面实现：零个子任务时 `all()` 为真，所以删除最后一个未完成子任务会让父任务变 `done`。只有父状态**真的被改写**时才返回一条 notice；从 `done` 回到 `doing` 提示「父任务已恢复为进行中」，从 `todo` 推到 `doing` 提示「父任务已自动标记为进行中」，退回 `todo` 时按原状态提示「父任务已恢复为未完成」或「父任务已自动标记为未完成」；前端按 FIFO 排队显示 2 秒后自动消失的轻提示。手动改父任务（包括 cascade 写子任务）不触发聚合、不产生提示；删父任务只向下级联，不向上聚合。
+聚合动作：子任务全为 `done` → 父置 `done`；否则只要有子任务为 `doing` 或 `done` → 父置 `doing`；子任务全为 `todo` → 父置 `todo`。规则按字面实现：零个子任务时 `all()` 为真，所以删除最后一个未完成子任务会让父任务变 `done`。只有父状态**真的被改写**时才返回一条 notice；从 `done` 回到 `doing` 提示「父任务已恢复为进行中」，从 `todo` 推到 `doing` 提示「父任务已自动标记为进行中」，退回 `todo` 时按原状态提示「父任务已恢复为未开始」或「父任务已自动标记为未开始」；前端按 FIFO 排队显示 2 秒后自动消失的轻提示。手动改父任务（包括 cascade 写子任务）不触发聚合、不产生提示；删父任务只向下级联，不向上聚合。
 
 | 事件 | 父任务 | 子任务 | 用户感知 |
 |---|---|---|---|
@@ -126,9 +130,9 @@ CREATE INDEX idx_task_parent  ON task(parent_task_id);
 
 | 状态变化 | `start_at` | `end_at` |
 |---|---|---|
-| 未完成 → 进行中 | 为空则记当前分钟 | 清空 |
-| 进行中 / 未完成 → 已完成 | 不动 | 记当前分钟 |
-| 任何状态 → 未完成 | 清空 | 清空 |
+| 未开始 → 进行中 | 为空则记当前分钟 | 清空 |
+| 进行中 / 未开始 → 已完成 | 不动 | 记当前分钟 |
+| 任何状态 → 未开始 | 清空 | 清空 |
 | 同一状态重复写入 | 不动 | 不动 |
 
 聚合自动改动父任务（自动完成 / 自动恢复进行中）也走 `write_status`，所以同样维护时间；一次级联完成的所有子任务共用同一个时间戳。任务如果在没开始过的情况下被级联或聚合标为已完成，只会得到结束时间，开始时间保持 `NULL`。
@@ -152,8 +156,8 @@ move_task(id, { container, module_id?, submodule_id? })   // 同容器或跨容�
 reparent_task(id, parent_task_id?) -> { task, notices }    // Some=降为该父任务的子任务；None=升为顶层
 
 // 写 · 状态（两段式）
-plan_set_status(id, status)           -> { affects: [task], needs_confirm, reason }
-apply_set_status(id, status, cascade: bool) -> { changed: [task], notices: [string] }
+plan_set_status(id, status)           -> { affects: [task], needs_confirm, reason: Message | null }
+apply_set_status(id, status, cascade: bool) -> { changed: [task], notices: [Message] }
 
 // 写 · 结构（删除同样两段式，先拿数量再确认）
 create_project(name) / rename_project(id, name) / plan_delete_project(id) -> { task_count } / delete_project(id)
@@ -171,7 +175,7 @@ delete_task(id) -> { notices }
 
 删除的条数一律包含会被级联带走的子任务；`plan_*` 只读，前端拿 `task_count` 填确认框，用户确认后才调 `delete_*`。
 
-**错误约定**：命令的 `Err` 一律是给人看的一句话（`String`），不用结构化错误对象——前端只做一件事：在底部轻提示里原样显示。需要分类处理的场景（`needs_confirm`、条数）走 `Ok` 里的字段，不走错误通道。
+**错误约定**：命令的 `Err` 一律是结构化消息 `Message { key, params }`（`src-tauri/src/message.rs`），后端不产生用户可见自然语言；前端用 `translateBackendMessage` 在底部轻提示里翻成当前语言。`params` 只放稳定 token、数字与原始技术细节（如 SQLite 报错），不放句子；需要分类处理的场景（`needs_confirm`、条数）仍走 `Ok` 里的字段，不走错误通道。Tauri 框架自身抛出的字符串错误（命令不存在、参数反序列化失败）由 `describe()` 兜底成一整句。新增后端 key 必须同步 `src-tauri/backend-keys.json` 与 `src/i18n/backend.ts` 的中英两张表，前后端各有一条测试盯着 catalog。
 
 **字段名约定**：跨 IPC 的结构一律 camelCase（Rust 侧 `#[serde(rename_all = "camelCase")]`，枚举值小写），前端类型与之逐字对应。字段名归后端所有，前端不另行映射。`domain.rs` 里有几条单测专门盯着这个契约。
 
@@ -188,10 +192,11 @@ delete_task(id) -> { notices }
 ## 前端结构
 
 - **视图状态**：`container`（我的待办 / 某个项目）、`scope`（全部 / 某模块 / 某子模块 / 默认）、`statusFilter: Set<Status>`、`priorityFilter: Set<Priority>`、`sort: TaskSort | null`（表头列排序）、`collapsedNodes: Set<nodeId>`（左栏范围树收起的模块）。筛选与列排序在本次会话内跨范围、跨项目保留；左栏宽度单独存 `localStorage`（`knot.sidebarWidth.v1`）。
+- **语言状态**：`src/i18n/index.ts` 持有模块级的当前语言；模式（`zh` / `en` / `system`）存 `localStorage`（`knot.language.v1`），`system` 只在启动时按 `navigator.language` 解析一次。切换语言时写存储、更新 `<html lang>` 与 `data-language`、重跑 `applyStaticTranslations()`、刷新主题/语言/最大化按钮文字，再走一次全量 `render()`；同时清空列宽缓存，让新语言下的 `COLUMN_MIN` 重新夹紧已存宽度。语言切换会丢弃正在进行的行内编辑，这是接受的取舍。
 - **一次渲染只建一棵树**：`buildGroups` 的结果同时给左栏范围树算计数、给表格做分组，`selectScope` 再把范围套上去——同一棵树不会被算两遍、更不会两份不一致。
 - **两处折叠互不影响**：左栏范围树的收起（`collapsedNodes`）只管树的显示，表格分组行的收起（`collapsedGroups`）只管表格的行。一个是导航，一个是阅读密度。
-- **数据管线**（单一方向，不双向绑定）：`list_tasks` → `buildGroups` → `selectScope` → 渲染时按两个筛选集判断任务是否出现；分组与计数始终使用未筛选的树。默认组内排序是「状态（已完成在后）→ 优先级 → 创建时间」；`state.sort` 有值时整组只按所选列排序。父任务在组内排序，子任务在各自父任务下用同一规则排序。
-- **表格列固定**为 状态 / 任务 / 优先级 / 创建 / 开始 / 结束 / 备注。表格正文 14.5px，任务标题与备注摘要同高；任务标题按列宽自动换行（`white-space: normal` + `overflow-wrap: anywhere`），行高随内容增长，父任务行的折叠箭头 / 计数 / 「＋」按首行对齐；三列时间是**只读**摘要（`YYYY-MM-DD HH:MM`，12.5px 等宽数字，未记录为 `—`），没有点击编辑入口；子任务行同样使用这三列。优先级 / 创建 / 开始 / 结束列名右侧有排序按钮（升序 → 降序 → 默认）；时间不影响筛选和计数。
+- **数据管线**（单一方向，不双向绑定）：`list_tasks` → `buildGroups` → `selectScope` → 渲染时按两个筛选集判断任务是否出现；分组与计数始终使用未筛选的树。默认组内排序是「状态（已完成在后）→ 优先级 → 创建时间」；`state.sort` 有值时整组只按所选列排序。父任务在组内排序，子任务在各自父任务下用同一规则排序。`grouping.ts` 不感知语言：派生的「默认」分组 `label` 为 `null`，显示名由 `main.ts` 的 `scopeLabel()` 按当前语言补上；模块/子模块的 `label` 仍是用户名字。
+- **表格列固定**为 状态 / 任务 / 优先级 / 创建 / 开始 / 结束 / 备注。表格正文 14.5px，任务标题与备注摘要同高；任务标题按列宽自动换行（`white-space: normal` + `overflow-wrap: anywhere`），行高随内容增长，父任务行的折叠箭头 / 计数 / 「＋」按首行对齐；三列时间是**只读**摘要，显示层按当前语言用 `Intl.DateTimeFormat` 格式化存储值（中文如 `2026/11/04 09:00`，英文如 `Nov 4, 2026, 9:00 AM`；未记录为 `—`），没有点击编辑入口；子任务行同样使用这三列。存储与排序仍用原始 `YYYY-MM-DDTHH:MM` 文本。优先级 / 创建 / 开始 / 结束列名右侧有排序按钮（升序 → 降序 → 默认）；时间不影响筛选和计数。
 - **悬停提示**：原生 `title` 的边框由系统绘制，CSS 改不了；`src/tooltip.ts` 的 `initTooltips()` 在指针进入时把标题文字移到 `data-tooltip` 并移除 `title`，400ms 后显示 `.hover-tip`（1px 细边、4px 小圆角，随指针定位；白底、正文色、13px，与轻提示和列宽提示统一）；离开、点击、滚轮、缩放、滚动或失焦时隐藏并还原 `title`，避免与系统提示同时出现。
 - **列宽可调**：表格不画单元格框线，分界线只在悬停 / 拖动时浮出；表头每条分界线都是拖动把手，拖动时同时调整线两侧的列，总宽度不变。一侧到最小宽度后继续拖动，会按 `status → title → priority → created → start → end → note` 的顺序带动同侧更远的列，反向同理；悬停时两侧表头一起高亮，拖动时浮出分界线两侧列当前宽度（如 `创建 152px · 开始 80px`）。「任务」列始终吃掉剩余宽度，窗口缩放时只有它伸缩；剩余宽度按 `.grid-scroll` 的 `clientWidth` 计算，不能读表格自身的 `clientWidth`（表格宽度由列宽撑开，会形成“表格不缩 → 任务列不缩”的死循环）。其他列宽存在 `localStorage`（`knot.columnWidths.v1`），下次启动沿用；存储不可用时退回默认宽度。最小列宽只保证内容不消失，时间列被拖窄时以省略号截断，悬停仍有完整值。
 - **纯函数单测**：`src/grouping.test.ts` 用 vitest 覆盖 `sortTasks` / `buildGroups` / `selectScope` / `resolveTarget` / `countGroup` 与筛选函数，`npm test` 直接跑，不启 Tauri、不碰 DOM。
@@ -206,8 +211,19 @@ delete_task(id) -> { notices }
 - **子任务渲染**：`buildGroups` 继续跳过 `parentTaskId !== null` 的任务（它们不占分组行，分组计数只算父任务）；渲染时另建 `parentTaskId → tasks` 的索引，父任务行后按同一套排序（优先级 → `sort_order`）渲染缩进子行。父任务行默认展开，`collapsedTasks` 只记本次会话里收起的那几个；父任务标题前的折叠箭头与行内「＋」只出现在顶层任务上。
 - **行内子任务输入**：`addingSubtaskFor` 同时只有一个父任务，输入草稿放在 `subtaskDraft`（状态对象外，重绘不丢）。回车保存并保持输入行打开（可连续添加），Esc 取消，失焦保存非空内容；失焦回调延后一拍并检查 `input.isConnected`，避免重绘换掉输入框时被误当成提交。
 - **轻提示队列**：表格底部一条队列，FIFO 一次显示一条，每条 2 秒后自动消失，不阻塞任何操作。外观与悬停提示统一：白底、正文色 13px、1px 细边、4px 小圆角；错误提示只把边框换成危险色，文字仍是正文色。一次操作带回多条提示时不会互相顶掉。
-- **启动失败页**：`boot()` 的第一件事是读 `?startupError=`；有值就用 `document.body.replaceChildren` 换成独立错误页，原因与备份路径原样放进 `<pre>`，直接 return，连 `render()` / `reload()` 都不走。
+- **启动失败页**：`boot()` 先解析语言，再读 `?startupError=`；有值是 JSON 就翻译 `error`、单独渲染 `backupPath`，不是 JSON（手工 URL / 旧格式）就当纯文本原样显示。错误页用 `document.body.replaceChildren` 接管，直接 return，连 `render()` / `reload()` 都不走。
 - **开发版重置**：按钮在左栏底部，默认 `hidden`，只有 `import.meta.env.DEV` 为真时取消隐藏并绑定点击；`vite build` 会把整段分支裁掉，正式版的后端也没有这条命令。确认框走 `askConfirm`，成功后把视图状态复位到「我的待办 / 全部」并全量重取，无需重启进程。
+
+## 国际化
+
+- **语言集合**：中文（`zh-CN`）与英文（`en-US`），不引入第三方 i18n 库。
+- **模式与持久化**：状态栏语言按钮提供「中文 / English / 跟随系统」三态；模式存 `localStorage` 的 `knot.language.v1`，首次启动默认 `system`，按 `navigator.language` 是否以 `zh` 开头决定。语言偏好不进数据库，因此不需要迁移；`system` 只在启动时解析一次，不监听系统语言实时变化。
+- **UI 字典**：`src/i18n/messages.zh.ts` 是 key 的唯一真相，`messages.en.ts` 用 `satisfies Record<MessageKey, string>` 强制全覆盖；`t(key, params)` 做 `{name}` 插值，`tp(base, count, params)` 用 `Intl.PluralRules` 选择 `.one` / `.other`。`i18n.test.ts` 校验两语言 key 集合、占位符集合完全一致。
+- **静态文案**：`index.html` 不保留自然语言文本，只留 `data-i18n` / `data-i18n-title` / `data-i18n-aria-label` / `data-i18n-placeholder`；`applyStaticTranslations()` 在启动与切换语言时统一赋值。`<head>` 内联脚本提前设置 `<html lang>`，避免首帧出现错误语言。
+- **动态文案**：`main.ts` 用稳定 token → message key 的映射（状态、优先级、时间、列名、排序），枚举值、`data-*`、`aria-sort`、localStorage 值一律不翻译。
+- **后端消息**：见 `message.rs` 与 `backend-keys.json`；`describe(error)` 同时兼容 `{ key, params }`、字符串与 `Error`。后端不接收语言参数，语言切换不影响任何命令。
+- **日期**：存储与排序不变；`src/i18n/date.ts` 只改显示，手动拆分 `YYYY-MM-DDTHH:MM` 并用本地 `Date` 构造，避免时区偏移。
+- **术语**：中文 ↔ 英文对照表见 `docs/i18n/glossary.md`，代码中的状态 token 永远是 `todo/doing/done`、优先级永远是 `high/mid/low`。
 
 ## 边界情况
 

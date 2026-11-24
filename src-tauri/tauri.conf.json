@@ -30,12 +30,25 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Whenyd",
+    "copyright": "© 2026 Whenyd",
+    "shortDescription": "A local-first desktop task manager for developer work",
+    "longDescription": "Knot is a local-first desktop task manager for developers, with project, module and submodule grouping plus one level of subtasks.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "languages": ["English", "SimpChinese"],
+        "displayLanguageSelector": true
+      },
+      "wix": {
+        "language": ["en-US", "zh-CN"]
+      }
+    }
   }
 }

@@ -1,25 +1,29 @@
 /**
- * 通用弹出菜单：左栏右键、任务行右键、优先级浮窗共用这一份实现。
+ * Shared popup menu: the sidebar context menu, task-row context menu and
+ * priority popover all use this one implementation.
  *
- * 只做“弹出、定位、关闭”三件事；菜单项的内容与行为由调用方给。
- * 定位支持指针点和元素锚定两种：前者用于右键，后者用于按钮下方。
+ * It only does three things — open, position, close; callers supply item
+ * content and behavior. Positioning supports two modes: a pointer point (for
+ * right-clicks) and an element anchor (below a button).
  *
- * 带 children 的条目不再内联展开，而是在父行旁边弹出独立的侧向子面板：
- * 父面板的布局永远不变，收起子项时不会把指针下的目标整体拽走。
+ * Items with children no longer expand inline; instead a separate side panel
+ * opens next to the parent row, so the parent's layout never shifts and closing
+ * the submenu cannot yank the target out from under the pointer.
  */
 
 export interface MenuItem {
   label: string;
-  /** 叶子项的动作。带 `children` 的条目点击只打开/收起子面板，不会执行它。 */
+  /** Action of a leaf item. Clicking an item with `children` only opens/closes its side panel; it never runs this. */
   onSelect?: () => void;
   /**
-   * 子项：条目变成可展开的分组，鼠标悬停、点击或键盘右键打开侧向子面板。
-   * 可以嵌套，用来收拢"项目 → 模块 → 子模块"这类长列表。
+   * Children: the item becomes an expandable group; hover, click or keyboard
+   * right-arrow opens the side panel. Nestable, for long lists like
+   * "project → module → submodule".
    */
   children?: readonly MenuItem[];
-  /** 当前选中项：显示勾，并让屏幕阅读器读作 menuitemradio。 */
+  /** Current selection: shows a check and makes screen readers announce menuitemradio. */
   checked?: boolean;
-  /** 非菜单行的装饰：分隔线 / 分组标题。默认是普通菜单项。 */
+  /** Decoration that is not a menu row: separator / group header. Defaults to a normal menu item. */
   type?: "item" | "separator" | "header";
 }
 
@@ -30,18 +34,18 @@ export type MenuPosition =
 export interface MenuOptions {
   items: readonly MenuItem[];
   position: MenuPosition;
-  /** 菜单的无障碍名，例如“优先级”。子面板会拼在它后面。 */
+  /** Accessible name of the menu, e.g. "Priority". Sub-panels append to it. */
   label?: string;
-  /** 关闭后把焦点还给谁；元素锚定时默认还给锚点。 */
+  /** Who gets focus back on close; defaults to the anchor when anchored to an element. */
   restoreFocus?: HTMLElement;
-  /** 额外的根面板 class，用来做项目菜单这类专用外观。 */
+  /** Extra root-panel class for special looks like the project menu. */
   className?: string;
 }
 
 interface PanelEntry {
   item: MenuItem;
   button: HTMLButtonElement;
-  /** 这一行打开的子面板；没打开为 null。 */
+  /** Side panel opened from this row; null when closed. */
   child: Panel | null;
 }
 
@@ -56,17 +60,17 @@ interface Panel {
 }
 
 interface OpenMenu {
-  /** 始终是一条路径：panels[i].parent === panels[i - 1]。 */
+  /** Always one path: panels[i].parent === panels[i - 1]. */
   panels: Panel[];
   anchor: HTMLElement | null;
   restoreFocus: HTMLElement | null;
 
-  /** 悬停打开子面板的意图计时器。 */
+  /** Intent timer for opening a side panel on hover. */
   intentTimer: number | null;
   intentEntry: PanelEntry | null;
-  /** 指针离开某一行后关闭它子面板的计时器。 */
+  /** Timer for closing a row's side panel after the pointer leaves it. */
   closeTimer: number | null;
-  /** 指针离开整棵菜单树后的计时器。 */
+  /** Timer for the pointer leaving the entire menu tree. */
   leaveTimer: number | null;
 
   cleanup: () => void;
@@ -94,7 +98,7 @@ function menuContains(node: Node): boolean {
   return open?.panels.some((panel) => panel.element.contains(node)) ?? false;
 }
 
-/** 事件目标落在哪一个面板里；键盘导航按当前面板取项。 */
+/** Which panel the event target is in; keyboard navigation picks items from the current panel. */
 function panelFor(node: Node): Panel | null {
   if (!open) return null;
   for (let index = open.panels.length - 1; index >= 0; index -= 1) {
@@ -104,13 +108,14 @@ function panelFor(node: Node): Panel | null {
 }
 
 /**
- * 弹出菜单。`items` 为空就什么也不做——“这个位置没有可做的事”不该弹一个空框。
+ * Open the menu. Empty `items` does nothing — "nothing to do here" should not
+ * pop an empty box.
  */
 export function openMenu(options: MenuOptions): void {
   const { items, position } = options;
   const anchor = position.kind === "anchor" ? position.element : null;
 
-  // 同一个锚点再点一次 = 收起（按钮语义）。
+  // Clicking the same anchor again = collapse (button semantics).
   if (anchor !== null && open?.anchor === anchor) {
     closeMenu();
     return;
@@ -136,7 +141,7 @@ export function openMenu(options: MenuOptions): void {
   session.panels.push(root);
   placeRoot(root.element, position);
 
-  // 面板事件都挂在各自面板上；全局只留一份。
+  // Panel events live on their own panels; only one global copy is kept.
   document.addEventListener("mousedown", onOutside);
   document.addEventListener("keydown", onEscape);
   document.addEventListener("keydown", onMenuKeydown);
@@ -159,7 +164,7 @@ export function openMenu(options: MenuOptions): void {
     window.removeEventListener("blur", closeMenu);
   };
 
-  // 优先级这类单选项默认把焦点放进当前值，其余菜单落在第一项。
+  // Radio-like menus such as priority focus the current value by default; others land on the first item.
   const checked = root.element.querySelector<HTMLButtonElement>('[aria-checked="true"]');
   (checked ?? root.entries[0]?.button)?.focus();
 }
@@ -171,7 +176,7 @@ export function closeMenu(): void {
 }
 
 // ---------------------------------------------------------------------------
-// 面板与菜单项
+// Panels and menu items
 // ---------------------------------------------------------------------------
 
 function createPanel(
@@ -221,7 +226,7 @@ function createPanel(
     element.append(entry.button);
   }
 
-  // 面板自己滚动时，挂在它上面的子面板会错位——直接关掉更深层。
+  // When a panel scrolls, side panels hanging off it get misaligned — just close the deeper ones.
   element.addEventListener("scroll", () => {
     trimPanels(session, level + 1, true);
   });
@@ -290,11 +295,11 @@ function createEntry(session: OpenMenu, panel: Panel, item: MenuItem): PanelEntr
       trimPanels(session, panel.level + 1, true);
       return;
     }
-    // 键盘触发的 click 没有鼠标细节（detail === 0）：顺手把焦点送进子面板。
+    // A keyboard-triggered click has no mouse detail (detail === 0): move focus into the side panel as well.
     openSubmenu(session, panel, entry, { focusFirst: event.detail === 0 });
   });
 
-  // 悬停到本行：分支准备打开子面板，叶子只负责关掉同级的旧子面板。
+  // Hovering this row: branches prepare to open a side panel; leaves only close stale sibling panels.
   button.addEventListener("pointerenter", (event) => {
     if (event.pointerType !== "mouse" || open !== session) return;
     cancelClose(session);
@@ -313,7 +318,7 @@ function createEntry(session: OpenMenu, panel: Panel, item: MenuItem): PanelEntr
 }
 
 // ---------------------------------------------------------------------------
-// 子面板的打开与关闭
+// Opening and closing side panels
 // ---------------------------------------------------------------------------
 
 function openSubmenu(
@@ -329,7 +334,7 @@ function openSubmenu(
   cancelIntent(session);
   cancelClose(session);
   cancelLeave(session);
-  // 同一层只保留一条路径：先关掉这个面板已有的子面板。
+  // Keep one path per level: close this panel's existing side panel first.
   trimPanels(session, panel.level + 1, true);
 
   const name = panel.name ? `${panel.name} / ${entry.item.label}` : entry.item.label;
@@ -344,8 +349,9 @@ function openSubmenu(
 }
 
 /**
- * 从尾部关掉面板，直到只剩 `keepCount` 个。
- * 焦点在将被关掉的面板里时，交还给它的父行（`focusFallback`）。
+ * Close panels from the tail until only `keepCount` remain.
+ * When focus is inside a panel being closed, hand it back to its parent row
+ * (`focusFallback`).
  */
 function trimPanels(session: OpenMenu, keepCount: number, focusFallback: boolean): void {
   if (open !== session) return;
@@ -374,7 +380,7 @@ function scheduleIntent(session: OpenMenu, panel: Panel, entry: PanelEntry): voi
     if (open !== session) return;
     if (!entry.button.isConnected || !entry.button.matches(":hover")) return;
 
-    // 已经停在别的行上：右侧只留这一条路径。
+    // Already resting on another row: keep only this path on the right.
     trimPanels(session, panel.level + 1, true);
     if (entry.item.children !== undefined && entry.item.children.length > 0) {
       openSubmenu(session, panel, entry, { focusFirst: false });
@@ -393,7 +399,7 @@ function scheduleClose(session: OpenMenu, child: Panel): void {
   session.closeTimer = window.setTimeout(() => {
     session.closeTimer = null;
     if (open !== session || !child.element.isConnected) return;
-    // 指针又回到父行或子面板里：保持打开。
+    // Pointer came back to the parent row or side panel: keep it open.
     if (child.element.matches(":hover") || child.parentRow?.matches(":hover")) return;
     trimPanels(session, child.level, true);
   }, HOVER_CLOSE_DELAY);
@@ -409,7 +415,7 @@ function scheduleLeave(session: OpenMenu): void {
   session.leaveTimer = window.setTimeout(() => {
     session.leaveTimer = null;
     if (open !== session || anyPanelHovered()) return;
-    // 指针离开整棵菜单树：只收子面板，根菜单保持打开。
+    // Pointer left the whole menu tree: close side panels only, keep the root menu open.
     trimPanels(session, 1, true);
     cancelIntent(session);
     cancelClose(session);
@@ -428,7 +434,7 @@ function clearSessionTimers(session: OpenMenu): void {
 }
 
 // ---------------------------------------------------------------------------
-// 定位
+// Positioning
 // ---------------------------------------------------------------------------
 
 function placeRoot(element: HTMLElement, position: MenuPosition): void {
@@ -451,14 +457,15 @@ function placeRoot(element: HTMLElement, position: MenuPosition): void {
     element.style.top = `${Math.max(EDGE, Math.round(top))}px`;
   }
 
-  // 菜单只会往下长到视口外；把可滚动高度收紧到剩余空间。
+  // The menu only grows downward past the viewport; clamp the scrollable height to the remaining space.
   const top = Number.parseFloat(element.style.top) || 0;
   element.style.maxHeight = `${Math.max(120, window.innerHeight - top - EDGE)}px`;
 }
 
 /**
- * 子面板贴在父行右侧；右边放不下就翻到左侧。
- * 必须是独立的 fixed 面板——根菜单有 overflow:auto，放在里面会被裁掉。
+ * The side panel hugs the parent row's right edge; if there is no room, it
+ * flips to the left. It must be a separate fixed panel — the root menu has
+ * overflow:auto, so nesting it inside would clip it.
  */
 function positionSubmenu(element: HTMLElement, parentRow: HTMLElement): void {
   const rect = parentRow.getBoundingClientRect();
@@ -478,20 +485,20 @@ function positionSubmenu(element: HTMLElement, parentRow: HTMLElement): void {
 }
 
 // ---------------------------------------------------------------------------
-// 全局事件
+// Global events
 // ---------------------------------------------------------------------------
 
 function onOutside(event: MouseEvent): void {
   if (!open) return;
   if (event.target instanceof Node) {
     if (menuContains(event.target)) return;
-    // 点锚点交给它自己的 click 处理：再点一次应当是收起，而不是“关掉再打开”。
+    // Let the anchor's own click handler deal with it: a second click should collapse, not "close then reopen".
     if (open.anchor?.contains(event.target)) return;
   }
   closeMenu();
 }
 
-/** 页面滚动就收起菜单；菜单面板自己内部滚不算。 */
+/** Any page scroll closes the menu; scrolling inside a menu panel does not count. */
 function onWindowScroll(event: Event): void {
   if (!open) return;
   if (event.target instanceof Node && menuContains(event.target)) return;
@@ -507,8 +514,10 @@ function onEscape(event: KeyboardEvent): void {
 }
 
 /**
- * 键盘：上下在当前面板内循环，右键进入子面板，左键退回父面板。
- * 子面板是独立元素，因此必须按“焦点所在面板”取项，不能再把整棵树拍平。
+ * Keyboard: up/down cycle within the current panel, right arrow enters a side
+ * panel, left arrow returns to the parent panel. Side panels are separate
+ * elements, so items must be picked from the "panel holding focus" rather than
+ * flattening the whole tree.
  */
 function onMenuKeydown(event: KeyboardEvent): void {
   if (!open) return;

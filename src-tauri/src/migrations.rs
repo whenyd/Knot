@@ -1,12 +1,17 @@
-//! 迁移：`MIGRATIONS` 是全部 schema 变更的顺序列表，`user_version` 即"已应用到第几条"。
+//! Migrations: `MIGRATIONS` is the ordered list of all schema changes, and `user_version`
+//! is "how many entries have been applied".
 //!
-//! 只写前进，不写 down。回滚靠迁移前的文件备份，而不是一条长期没人执行的逆向脚本。
+//! Forward only, no down migrations. Rollback relies on the pre-migration file backup, not
+//! on an inverse script that nobody ever runs.
 
 use rusqlite::Connection;
 
-/// 顺序执行的迁移脚本。索引 `i` 的脚本把库从版本 `i` 推到 `i + 1`。
+use crate::message::{Message, MessageKey, Res};
+
+/// Migration scripts executed in order. The script at index `i` moves the database from
+/// version `i` to `i + 1`.
 ///
-/// 追加新条目即可；已发布的条目一个字都不要改。
+/// Just append new entries; never change a single character of an already released entry.
 pub const MIGRATIONS: &[&str] = &[
     V1_INITIAL_SCHEMA,
     V2_TASK_CLASSIFICATION_CASCADE,
@@ -15,7 +20,7 @@ pub const MIGRATIONS: &[&str] = &[
     V5_TASK_CREATED_AT,
 ];
 
-/// v1：项目 / 模块 / 子模块 / 任务，两层分类 + 一层子任务。
+/// v1: project / module / submodule / task—two classification levels plus one subtask level.
 const V1_INITIAL_SCHEMA: &str = r#"
 CREATE TABLE project (
   id          INTEGER PRIMARY KEY,
@@ -39,10 +44,10 @@ CREATE TABLE submodule (
 
 CREATE TABLE task (
   id             INTEGER PRIMARY KEY,
-  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,  -- NULL = 「我的待办」
+  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,  -- NULL = "My Todos"
   module_id      INTEGER REFERENCES module(id) ON DELETE SET NULL,
   submodule_id   INTEGER REFERENCES submodule(id) ON DELETE SET NULL,
-  parent_task_id INTEGER REFERENCES task(id) ON DELETE CASCADE,     -- NULL = 顶层任务
+  parent_task_id INTEGER REFERENCES task(id) ON DELETE CASCADE,     -- NULL = top-level task
   title          TEXT    NOT NULL,
   status         TEXT    NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','doing','done')),
   priority       TEXT    NOT NULL DEFAULT 'mid'  CHECK (priority IN ('high','mid','low')),
@@ -55,17 +60,19 @@ CREATE INDEX idx_task_module  ON task(module_id);
 CREATE INDEX idx_task_parent  ON task(parent_task_id);
 "#;
 
-/// v2：删除模块 / 子模块时，组内任务跟着删除，而不是退回归类。
+/// v2: when a module / submodule is deleted, the tasks inside it are deleted too instead of
+/// falling back to a classification.
 ///
-/// SQLite 不能直接改外键动作，只能重建表。迁移期间外键已被关闭，
-/// 所以可以整表拷贝；`parent_task_id` 的自引用会随表名一起更新。
+/// SQLite cannot change a foreign key action in place, so the table must be rebuilt.
+/// Foreign keys are already disabled during migration, so the whole table can be copied;
+/// the self-reference in `parent_task_id` is updated along with the table name.
 const V2_TASK_CLASSIFICATION_CASCADE: &str = r#"
 CREATE TABLE task_v2 (
   id             INTEGER PRIMARY KEY,
-  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,  -- NULL = 「我的待办」
+  project_id     INTEGER REFERENCES project(id) ON DELETE CASCADE,  -- NULL = "My Todos"
   module_id      INTEGER REFERENCES module(id) ON DELETE CASCADE,
   submodule_id   INTEGER REFERENCES submodule(id) ON DELETE CASCADE,
-  parent_task_id INTEGER REFERENCES task_v2(id) ON DELETE CASCADE,  -- NULL = 顶层任务
+  parent_task_id INTEGER REFERENCES task_v2(id) ON DELETE CASCADE,  -- NULL = top-level task
   title          TEXT    NOT NULL,
   status         TEXT    NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','doing','done')),
   priority       TEXT    NOT NULL DEFAULT 'mid'  CHECK (priority IN ('high','mid','low')),
@@ -87,8 +94,9 @@ CREATE INDEX idx_task_module  ON task(module_id);
 CREATE INDEX idx_task_parent  ON task(parent_task_id);
 "#;
 
-/// v3：把旧数据里高于父任务的子任务降到父任务的档位。
-/// 规则从这一版起由 `domain::set_priority` 保证；迁移只负责把历史数据拉回合法状态。
+/// v3: lower historical subtasks whose priority is above their parent's to the parent's
+/// level. From this version on the rule is enforced by `domain::set_priority`; the migration
+/// only brings historical data back into a valid state.
 const V3_CLAMP_SUBTASK_PRIORITY: &str = r#"
 UPDATE task
 SET priority = (
@@ -114,104 +122,131 @@ WHERE parent_task_id IS NOT NULL
   );
 "#;
 
-/// v4：任务增加开始 / 结束时间。两列都可空，存本地时间字符串
-/// `YYYY-MM-DDTHH:MM`（格式与 HTML `datetime-local` 一致，按文本可比较）。
-/// 已有任务升级后两列为 NULL，表示未设置。
+/// v4: tasks gain start / end times. Both columns are nullable and store local time
+/// strings `YYYY-MM-DDTHH:MM` (same format as HTML `datetime-local`, comparable as text).
+/// After the upgrade, existing tasks have NULL in both columns, meaning unset.
 const V4_TASK_SCHEDULE: &str = r#"
 ALTER TABLE task ADD COLUMN start_at TEXT;
 ALTER TABLE task ADD COLUMN end_at   TEXT;
 "#;
 
-/// v5：任务增加创建时间。可空：升级前的任务不知道创建时刻，保持 NULL；
-/// 之后新建的任务由 `domain::create_task` 写入本地时间 `YYYY-MM-DDTHH:MM`。
+/// v5: tasks gain a creation time. Nullable: tasks from before the upgrade have no known
+/// creation moment, so they stay NULL. New tasks created afterwards are written by
+/// `domain::create_task` with local time `YYYY-MM-DDTHH:MM`.
 const V5_TASK_CREATED_AT: &str = r#"
 ALTER TABLE task ADD COLUMN created_at TEXT;
 "#;
 
-/// 库当前已应用到第几条迁移。`0` 表示全新库。
-pub fn current_version(conn: &Connection) -> Result<i64, String> {
+/// How many migrations the database currently has applied. `0` means a brand-new database.
+pub fn current_version(conn: &Connection) -> Res<i64> {
     conn.pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|e| format!("无法读取 user_version：{e}"))
+        .map_err(|e| {
+            Message::new(MessageKey::StartupReadVersionFailed).param("detail", e.to_string())
+        })
 }
 
-/// 本程序支持的迁移总数。
+/// Total number of migrations this program supports.
 pub fn target_version() -> i64 {
     MIGRATIONS.len() as i64
 }
 
-/// 把库推到最新版本。已经是最新就什么都不做。
-pub fn migrate(conn: &mut Connection) -> Result<(), String> {
+/// Bring the database up to the latest version. Does nothing if it is already latest.
+pub fn migrate(conn: &mut Connection) -> Res<()> {
     let current = current_version(conn)?;
     let target = target_version();
 
     if current > target {
-        // 库比程序新：多半是降级运行。继续写会破坏未知版本的结构。
-        return Err(format!(
-            "数据库版本 {current} 高于本程序支持的 {target}，拒绝启动以免损坏数据"
-        ));
+        // The database is newer than the program: likely a downgrade. Writing further
+        // would damage a structure of an unknown version.
+        return Err(Message::new(MessageKey::StartupNewerDatabase)
+            .param("current", current)
+            .param("target", target));
     }
     if current == target {
         return Ok(());
     }
 
-    // PRAGMA foreign_keys 在事务内是 no-op，所以必须在开事务之前关。
+    // PRAGMA foreign_keys is a no-op inside a transaction, so it must be disabled before
+    // opening one.
     conn.pragma_update(None, "foreign_keys", false)
-        .map_err(|e| format!("无法临时关闭外键约束：{e}"))?;
+        .map_err(|e| {
+            Message::new(MessageKey::StartupDisableForeignKeysFailed)
+                .param("detail", e.to_string())
+        })?;
 
     let applied = apply_all(conn, current as usize);
 
-    // 无论成功失败都先把外键恢复，别把连接留在半配置状态。
+    // Restore foreign keys whether or not this succeeds; never leave the connection
+    // half-configured.
     conn.pragma_update(None, "foreign_keys", true)
-        .map_err(|e| format!("无法恢复外键约束：{e}"))?;
+        .map_err(|e| {
+            Message::new(MessageKey::StartupEnableForeignKeysFailed).param("detail", e.to_string())
+        })?;
     applied
 }
 
-/// 整段包在单个事务里：迁移要么全到，要么一点不动。
-fn apply_all(conn: &mut Connection, from: usize) -> Result<(), String> {
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("无法开启迁移事务：{e}"))?;
+/// Wrap the whole thing in a single transaction: migrations either all land or none do.
+fn apply_all(conn: &mut Connection, from: usize) -> Res<()> {
+    let tx = conn.transaction().map_err(|e| {
+        Message::new(MessageKey::StartupBeginTransactionFailed).param("detail", e.to_string())
+    })?;
 
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(from) {
         tx.execute_batch(sql).map_err(|e| {
-            // SQLite 的报错会把整段失败的 SQL 也带上；给用户只留第一行。
+            // SQLite errors include the whole failed SQL; keep only the first line for
+            // the user.
             let message = e.to_string();
             let first = message.lines().next().unwrap_or(&message);
-            // 「table X already exists in」后面的 SQL 已被截掉，收尾的 " in" 也去掉。
+            // The SQL after "table X already exists in" has been truncated, so drop the
+            // trailing " in" as well.
             let first = first.strip_suffix(" in").unwrap_or(first);
-            format!("迁移到版本 {} 失败：{first}", i + 1)
+            Message::new(MessageKey::StartupMigrationFailed)
+                .param("version", i + 1)
+                .param("detail", first)
         })?;
         tx.pragma_update(None, "user_version", (i + 1) as i64)
-            .map_err(|e| format!("迁移到版本 {} 后写 user_version 失败：{e}", i + 1))?;
+            .map_err(|e| {
+                Message::new(MessageKey::StartupWriteVersionFailed)
+                    .param("version", i + 1)
+                    .param("detail", e.to_string())
+            })?;
     }
 
-    // 校验必须在提交之前：失败时连 user_version 一起回滚，下次启动还会重新
-    // 失败并拒绝启动；提交后再校验的话，下一次启动会以为迁移已完成而放行。
+    // Validation must happen before commit: on failure user_version rolls back with it,
+    // so the next startup fails again and refuses to start. If we validated after commit,
+    // the next startup would think the migration finished and let it through.
     check_foreign_keys(&tx)?;
 
-    tx.commit().map_err(|e| format!("提交迁移事务失败：{e}"))
+    tx.commit().map_err(|e| {
+        Message::new(MessageKey::StartupCommitFailed).param("detail", e.to_string())
+    })
 }
 
-/// 提交后跑一次全库外键检查：级联规则写错了，要在这里就炸，而不是等到某次删除。
-fn check_foreign_keys(conn: &Connection) -> Result<(), String> {
-    let mut stmt = conn
-        .prepare("PRAGMA foreign_key_check")
-        .map_err(|e| format!("无法执行外键校验：{e}"))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("无法执行外键校验：{e}"))?;
+/// Run a full-database foreign key check after commit: a wrong cascade rule must blow up
+/// here, not during some later delete.
+fn check_foreign_keys(conn: &Connection) -> Res<()> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check").map_err(|e| {
+        Message::new(MessageKey::StartupForeignKeyCheckFailed).param("detail", e.to_string())
+    })?;
+    let mut rows = stmt.query([]).map_err(|e| {
+        Message::new(MessageKey::StartupForeignKeyCheckFailed).param("detail", e.to_string())
+    })?;
 
     let mut violations = 0;
     while rows
         .next()
-        .map_err(|e| format!("无法读取外键校验结果：{e}"))?
+        .map_err(|e| {
+            Message::new(MessageKey::StartupForeignKeyCheckReadFailed)
+                .param("detail", e.to_string())
+        })?
         .is_some()
     {
         violations += 1;
     }
 
     if violations > 0 {
-        return Err(format!("迁移校验失败（已回滚）：{violations} 条悬空引用"));
+        return Err(Message::new(MessageKey::StartupForeignKeyViolations)
+            .param("count", violations as usize));
     }
     Ok(())
 }
@@ -220,7 +255,8 @@ fn check_foreign_keys(conn: &Connection) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// 内存库跑一遍迁移，确认 schema 落地且版本号推进到最新。
+    /// Run migrations on an in-memory database and confirm the schema lands and the
+    /// version reaches the latest.
     #[test]
     fn migrate_fresh_database() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -241,11 +277,11 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert!(exists, "表 {table} 未创建");
+            assert!(exists, "table {table} was not created");
         }
     }
 
-    /// 再跑一次是 no-op，不报错、不重复执行脚本。
+    /// Running it again is a no-op: no error, no scripts re-executed.
     #[test]
     fn migrate_is_idempotent() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -253,7 +289,8 @@ mod tests {
         migrate(&mut conn).unwrap();
     }
 
-    /// 库比程序新时拒绝启动，而不是硬着头皮写下去。
+    /// Refuse to start when the database is newer than the program, instead of writing on
+    /// regardless.
     #[test]
     fn refuses_newer_database() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -269,7 +306,8 @@ mod tests {
         .unwrap()
     }
 
-    /// v2 只重建 task 表：老数据原样保留，分类外键改成级联删除。
+    /// v2 only rebuilds the task table: old data is preserved as-is, and classification
+    /// foreign keys become CASCADE.
     #[test]
     fn v2_upgrades_existing_data_and_cascades() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -309,17 +347,18 @@ mod tests {
                 actions
                     .iter()
                     .any(|(from, on_delete)| from == column && on_delete == "CASCADE"),
-                "{column} 没有改成级联删除：{actions:?}"
+                "{column} was not switched to CASCADE: {actions:?}"
             );
         }
 
         conn.execute("DELETE FROM module WHERE id = 1", []).unwrap();
-        assert_eq!(count(&conn, "task"), 1, "组内任务应随模块一起删除");
+        assert_eq!(count(&conn, "task"), 1, "tasks in the module should be deleted with it");
         assert_eq!(count(&conn, "submodule"), 0);
         check_foreign_keys(&conn).unwrap();
     }
 
-    /// v3 把旧数据里高于父任务的子任务降到父任务档位；合法的子任务不动。
+    /// v3 lowers historical subtasks with a higher priority down to the parent's level;
+    /// valid subtasks are untouched.
     #[test]
     fn v3_clamps_children_to_parent_priority() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -363,7 +402,7 @@ mod tests {
         );
     }
 
-    /// v4 只加两列：老任务保留，时间默认未设置。
+    /// v4 only adds two columns: old tasks are preserved, and times default to unset.
     #[test]
     fn v4_adds_empty_schedule_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -382,10 +421,11 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(schedule, (None, None), "升级后的任务时间应为未设置");
+        assert_eq!(schedule, (None, None), "upgraded tasks should have unset times");
     }
 
-    /// v5 只加创建时间列：老任务不知道创建时刻，保持 NULL。
+    /// v5 only adds the created_at column: old tasks have an unknown creation time and stay
+    /// NULL.
     #[test]
     fn v5_adds_empty_created_at() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -402,14 +442,16 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(created_at, None, "升级前的任务不伪造创建时间");
+        assert_eq!(created_at, None, "tasks from before the upgrade must not fake a creation time");
     }
 
-    /// 外键校验在事务内：有悬空引用时整段回滚，user_version 不变、新表不留下。
+    /// Foreign key validation happens inside the transaction: with dangling references the
+    /// whole thing rolls back, user_version is unchanged, and no new tables are left behind.
     #[test]
     fn foreign_key_check_failure_rolls_back() {
         let mut conn = Connection::open_in_memory().unwrap();
-        // bundled SQLite 默认开着外键；构造历史脏数据前先关掉。
+        // Bundled SQLite has foreign keys on by default; disable them first to construct
+        // dirty historical data.
         conn.pragma_update(None, "foreign_keys", false).unwrap();
         conn.execute_batch(V1_INITIAL_SCHEMA).unwrap();
         conn.pragma_update(None, "user_version", 1i64).unwrap();
@@ -417,11 +459,15 @@ mod tests {
             .unwrap();
 
         let err = migrate(&mut conn).unwrap_err();
-        assert!(err.contains("悬空引用"), "{err}");
+        assert_eq!(err.key, MessageKey::StartupForeignKeyViolations);
+        assert_eq!(
+            err.params.get("count"),
+            Some(&crate::message::MessageParam::Number(1))
+        );
         assert_eq!(
             current_version(&conn).unwrap(),
             1,
-            "失败必须回滚 user_version"
+            "failure must roll back user_version"
         );
 
         let v2_exists: bool = conn
@@ -431,6 +477,6 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(!v2_exists, "失败的事务不应留下 task_v2");
+        assert!(!v2_exists, "a failed transaction must not leave task_v2 behind");
     }
 }

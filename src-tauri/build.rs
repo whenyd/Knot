@@ -1,5 +1,5 @@
 fn main() {
-    // 图标改了就重新跑构建脚本，否则 exe 里的资源还是旧的
+    // Re-run the build script when icons change; otherwise the exe keeps stale resources.
     println!("cargo:rerun-if-changed=icons/icon.ico");
     println!("cargo:rerun-if-changed=icons/icon.png");
     tauri_build::build()

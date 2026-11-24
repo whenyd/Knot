@@ -1,12 +1,14 @@
 /**
- * 数据管线里"算"的那一段：排序、分组、范围筛选。纯函数，不碰 DOM、不发命令。
+ * The "compute" half of the data pipeline: sorting, grouping, scope filtering.
+ * Pure functions: no DOM, no commands.
  *
- * 之所以放在前端而不是 SQL：任务量在本机是小规模，前端算足够快，
- * 也免得为"分组 × 筛选 × 排序"的每种组合写一条查询。
+ * It lives in the frontend rather than SQL because the task count is small on
+ * one machine and the frontend is fast enough, and it avoids writing a query
+ * for every combination of grouping × filtering × sorting.
  */
 import type { Module, Priority, ScopeTarget, Status, Task } from "./api";
 
-/** 状态与优先级是“且”关系；集合内是“或”关系。 */
+/** Status and priority combine with AND; values within a set combine with OR. */
 export interface TaskFilters {
   statuses: ReadonlySet<Status>;
   priorities: ReadonlySet<Priority>;
@@ -16,15 +18,15 @@ export function taskMatchesFilters(task: Task, filters: TaskFilters): boolean {
   return filters.statuses.has(task.status) && filters.priorities.has(task.priority);
 }
 
-/** 筛选只决定渲染哪些任务，不改动分组树和计数所用的原始任务。 */
+/** Filtering only decides which tasks render; the grouping tree and counts keep the original tasks. */
 export function filterTasks(tasks: readonly Task[], filters: TaskFilters): Task[] {
   return tasks.filter((task) => taskMatchesFilters(task, filters));
 }
 
-/** 优先级排序值：高 → 中 → 低。 */
+/** Priority sort value: high → mid → low. */
 const PRIORITY_RANK: Record<Priority, number> = { high: 0, mid: 1, low: 2 };
 
-/** 未记录创建时间的旧任务视为最早；字符串是 `YYYY-MM-DDTHH:MM`，可直接比较。 */
+/** Legacy tasks without a creation time sort as oldest; the string is `YYYY-MM-DDTHH:MM`, so compare directly. */
 function compareCreatedAt(a: Task, b: Task): number {
   const aTime = a.createdAt ?? "";
   const bTime = b.createdAt ?? "";
@@ -36,17 +38,17 @@ function doneRank(task: Task): number {
   return task.status === "done" ? 1 : 0;
 }
 
-/** 表头可点的排序列。 */
+/** Columns whose header can be clicked to sort. */
 export type SortField = "priority" | "created" | "start" | "end";
 export type SortDirection = "asc" | "desc";
 
-/** `null` 表示默认排序：状态 → 优先级 → 创建时间。 */
+/** `null` means the default order: status → priority → creation time. */
 export interface TaskSort {
   field: SortField;
   direction: SortDirection;
 }
 
-/** 未记录的时间不论升降序都排在有值之后。 */
+/** Unrecorded times sort after recorded ones in both directions. */
 function compareTime(a: string | null, b: string | null, direction: number): number {
   if (a === null || b === null) {
     if (a === b) return 0;
@@ -70,11 +72,12 @@ function compareField(a: Task, b: Task, field: SortField, direction: number): nu
 }
 
 /**
- * 组内排序。
+ * Sort within a group.
  *
- * 没有列排序时：未完成 / 进行中一组在前，已完成一组在后；两组内部按优先级
- * → 创建时间。
- * 选了一列时：整组按该列排序（不再分已完成），同值再按创建时间 / 添加顺序。
+ * Without a column sort: unfinished / in-progress first, done last; inside each
+ * part, by priority → creation time.
+ * With a column selected: the whole group sorts by that column (done tasks are
+ * no longer separated), with ties broken by creation time / insertion order.
  */
 export function sortTasks(tasks: readonly Task[], sort: TaskSort | null = null): Task[] {
   const direction = sort?.direction === "desc" ? -1 : 1;
@@ -95,8 +98,9 @@ export function sortTasks(tasks: readonly Task[], sort: TaskSort | null = null):
 }
 
 /**
- * 「降为子任务」的候选父任务排序：未完成 / 进行中在前，已完成在后；
- * 同一状态内按创建时间升序（未记录创建时间的旧任务按最早已有任务处理）。
+ * Order of candidate parents for "demote to subtask": unfinished / in-progress
+ * first, done last; within a status, by creation time ascending (legacy tasks
+ * without a creation time count as the oldest).
  */
 export function sortParentCandidates(tasks: readonly Task[]): Task[] {
   return [...tasks].sort(
@@ -109,9 +113,10 @@ export function sortParentCandidates(tasks: readonly Task[]): Task[] {
 }
 
 /**
- * 主视图的范围：整个项目 / 某个模块 / 某个子模块 / 默认。
+ * The main view's scope: whole project / one module / one submodule / default.
  *
- * 「我的待办」没有这层树，所以它不出现在这里——我的待办视图恒为整个容器。
+ * "My tasks" has no tree, so it never appears here — its view is always the
+ * whole container.
  */
 export type Scope =
   | { kind: "project" }
@@ -119,23 +124,26 @@ export type Scope =
   | { kind: "submodule"; id: number }
   | { kind: "unclassified" };
 
-/** 一个分组（模块、子模块，或「默认」）。 */
+/** A group (module, submodule, or "unclassified"). */
 export interface Group {
   kind: "module" | "submodule" | "unclassified";
-  /** 「默认」是派生分组，没有 id。 */
+  /** The default group is derived and has no id. */
   id: number | null;
-  label: string;
-  /** 0 = 模块（或提升为范围的子模块）；1 = 缩进一级的子模块。 */
+  /** User-defined name; the derived default group has none. */
+  label: string | null;
+  /** 0 = module (or a submodule promoted to scope); 1 = submodule indented one level. */
   depth: 0 | 1;
   tasks: Task[];
   children: Group[];
 }
 
 /**
- * 按模块建树分组。位置即分类：模块/子模块不占列，只当分组行。
+ * Build the grouping tree by module. Location is the classification:
+ * modules/submodules take no column, only group rows.
  *
- * 任务归属优先级：`submoduleId` > `moduleId` > 默认。子任务不单独成组，
- * 由渲染器跟在父任务下面（本切片还不建子任务）。
+ * Ownership priority: `submoduleId` > `moduleId` > default. Subtasks never form
+ * their own group; the renderer shows them under their parent (this slice does
+ * not create subtasks yet).
  */
 export function buildGroups(
   tasks: readonly Task[],
@@ -150,7 +158,7 @@ export function buildGroups(
   };
 
   for (const task of tasks) {
-    if (task.parentTaskId !== null) continue; // 子任务跟随父任务，不占分组
+    if (task.parentTaskId !== null) continue; // subtasks follow their parent, no group of their own
     if (task.submoduleId !== null) push(`submodule-${task.submoduleId}`, task);
     else if (task.moduleId !== null) push(`module-${task.moduleId}`, task);
     else push("unclassified", task);
@@ -158,22 +166,23 @@ export function buildGroups(
 
   const take = (key: string) => sortTasks(store.get(key) ?? [], sort);
 
-  // 「默认」是派生分组，空时不占一行；未归类任务最需要先看到，所以排在模块之前。
+  // The default group is derived and takes no row when empty; unclassified tasks
+  // need to be seen first, so it goes before the modules.
   const groups: Group[] = [];
   const unclassified = take("unclassified");
   if (unclassified.length > 0) {
     groups.push({
       kind: "unclassified",
       id: null,
-      label: "默认",
+      label: null,
       depth: 0,
       tasks: unclassified,
       children: [],
     });
   }
 
-  // 用户建的模块与子模块一律保留，即使暂时是 0/0：它们是结构，
-  // 藏起来会让人以为没建成。
+  // User-created modules and submodules are always kept, even at 0/0 for now:
+  // they are structure, and hiding them would look like they were never created.
   const moduleGroups: Group[] = modules.map((module) => ({
     kind: "module",
     id: module.id,
@@ -194,7 +203,7 @@ export function buildGroups(
   return groups;
 }
 
-/** 分组行计数：只算父任务。`done` / `total`，含子分组。 */
+/** Group row count: parent tasks only. `done` / `total`, including child groups. */
 export function countGroup(group: Group): { done: number; total: number } {
   let done = 0;
   let total = 0;
@@ -209,7 +218,7 @@ export function countGroup(group: Group): { done: number; total: number } {
   return { done, total };
 }
 
-/** 一组分组的合计计数。 */
+/** Combined count across a list of groups. */
 export function countGroups(groups: readonly Group[]): { done: number; total: number } {
   return groups.reduce(
     (sum, group) => {
@@ -221,10 +230,11 @@ export function countGroups(groups: readonly Group[]): { done: number; total: nu
 }
 
 /**
- * 把范围套到分组树上。
+ * Apply a scope to the grouping tree.
  *
- * 范围的根就是视图的根：选中某个子模块时它自己成了最外层，不再缩进；
- * 选中模块时保留它的子模块（子树的形状不变）。
+ * The scope's root is the view's root: a selected submodule becomes the
+ * outermost level and is no longer indented; a selected module keeps its
+ * submodules (the subtree keeps its shape).
  */
 export function selectScope(groups: readonly Group[], scope: Scope): Group[] {
   switch (scope.kind) {
@@ -246,28 +256,11 @@ export function selectScope(groups: readonly Group[], scope: Scope): Group[] {
   }
 }
 
-/** 范围在左栏的显示名。 */
-export function scopeLabel(groups: readonly Group[], scope: Scope): string {
-  switch (scope.kind) {
-    case "project":
-      return "全部";
-    case "unclassified":
-      return "默认";
-    case "module":
-      return groups.find((g) => g.kind === "module" && g.id === scope.id)?.label ?? "模块";
-    case "submodule":
-      for (const group of groups) {
-        const child = group.children.find((n) => n.kind === "submodule" && n.id === scope.id);
-        if (child) return child.label;
-      }
-      return "子模块";
-  }
-}
-
 /**
- * 当前范围对应的任务归属：新建任务就落在这里。
+ * Task ownership for the current scope: a new task lands here.
  *
- * “全部”与“默认”都是没有分类的位置，新任务自然进默认。
+ * "All" and "default" are both positions without a classification, so new tasks
+ * naturally fall into the default group.
  */
 export function resolveTarget(groups: readonly Group[], scope: Scope): ScopeTarget {
   switch (scope.kind) {
@@ -277,7 +270,7 @@ export function resolveTarget(groups: readonly Group[], scope: Scope): ScopeTarg
     case "module":
       return { moduleId: scope.id, submoduleId: null };
     case "submodule": {
-      // 子模块必须连同它的模块一起报上去
+      // A submodule must be reported together with its module
       for (const group of groups) {
         if (group.kind !== "module" || group.id === null) continue;
         const owns = group.children.some(
