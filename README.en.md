@@ -6,6 +6,16 @@ Knot (结) — one knot records one thing. A structured list for development tas
 For requirements see [docs/specs/goal-and-requirements.en.md](docs/specs/goal-and-requirements.en.md); for layering and the data model see [docs/specs/architecture.en.md](docs/specs/architecture.en.md);
 **for what is left to do see [docs/ROADMAP.en.md](docs/ROADMAP.en.md)**. Chinese: [README.md](README.md).
 
+## Screenshots
+
+English · Light:
+
+![English light UI](docs/assets/screenshot-en-light.png)
+
+English · Dark:
+
+![English dark UI](docs/assets/screenshot-en-dark.png)
+
 ## Current status
 
 The full feature set is in place:

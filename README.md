@@ -4,6 +4,16 @@ Knot（结）——一道结记一件事。开发任务的结构化清单：单�
 需求见 [docs/specs/goal-and-requirements.md](docs/specs/goal-and-requirements.md)，分层与数据模型见 [docs/specs/architecture.md](docs/specs/architecture.md)，
 **剩下要做什么见 [docs/ROADMAP.md](docs/ROADMAP.md)**。English: [README.en.md](README.en.md)。
 
+## 截图
+
+中文 · 浅色：
+
+![中文浅色界面](docs/assets/screenshot-zh-light.png)
+
+中文 · 深色：
+
+![中文深色界面](docs/assets/screenshot-zh-dark.png)
+
 ## 当前状态
 
 完整功能已就位：
